@@ -1,0 +1,6 @@
+PyQt6>=6.5
+evdev>=1.6; sys_platform == "linux"
+hidapi>=0.14; sys_platform == "darwin"
+sounddevice>=0.4
+numpy>=1.24
+soundfile>=0.12

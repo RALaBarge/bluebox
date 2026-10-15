@@ -1,0 +1,103 @@
+import json
+import os
+import subprocess
+import tempfile
+import threading
+import time
+import urllib.request
+import urllib.error
+from typing import Optional
+
+
+class STTEngine:
+    def __init__(self, engine_type: str = "remote_server", server_url: str = ""):
+        self.engine_type = engine_type
+        self.server_url = server_url
+
+    def transcribe(self, audio_data: bytes, sample_rate: int = 16000) -> Optional[str]:
+        if self.engine_type == "remote_server":
+            return self._transcribe_remote(audio_data, sample_rate)
+        elif self.engine_type == "whisper_local":
+            return self._transcribe_whisper_local(audio_data, sample_rate)
+        elif self.engine_type == "vosk":
+            return self._transcribe_vosk(audio_data, sample_rate)
+        return None
+
+    def _transcribe_remote(self, audio_data: bytes, sample_rate: int) -> Optional[str]:
+        if not self.server_url:
+            return "[No STT server configured]"
+        try:
+            import soundfile as sf
+        except ImportError:
+            return _fallback_text(audio_data)
+        try:
+            temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            try:
+                sf.write(temp.name, audio_data, sample_rate)
+            except Exception:
+                temp.close()
+                os.unlink(temp.name)
+                return _fallback_text(audio_data)
+            temp.close()
+
+            with open(temp.name, "rb") as f:
+                audio_bytes = f.read()
+            os.unlink(temp.name)
+
+            req = urllib.request.Request(
+                self.server_url.rstrip("/") + "/transcribe",
+                data=audio_bytes,
+                headers={"Content-Type": "audio/wav"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                result = json.loads(resp.read().decode())
+                return result.get("text")
+        except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
+                OSError, subprocess.CalledProcessError) as e:
+            return f"[STT error: {e}]"
+
+    def _transcribe_whisper_local(self, audio_data: bytes, sample_rate: int) -> Optional[str]:
+        try:
+            import soundfile as sf
+            import numpy as np
+        except ImportError:
+            return "[Install soundfile + numpy for local Whisper]"
+
+        temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        sf.write(temp.name, audio_data, sample_rate)
+        temp.close()
+
+        try:
+            result = subprocess.run(
+                ["whisper", temp.name, "--model", "base", "--output_format", "json"],
+                capture_output=True, text=True, timeout=120,
+            )
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                return data.get("text", "").strip()
+            return f"[Whisper error: {result.stderr.strip()}]"
+        except FileNotFoundError:
+            return "[Whisper CLI not found — install openai-whisper]"
+        except subprocess.TimeoutExpired:
+            return "[Whisper timed out]"
+        finally:
+            os.unlink(temp.name)
+
+    def _transcribe_vosk(self, audio_data: bytes, sample_rate: int) -> Optional[str]:
+        return "[Vosk not yet implemented]"
+
+    def is_available(self) -> bool:
+        if self.engine_type == "remote_server" and self.server_url:
+            return True
+        if self.engine_type == "whisper_local":
+            try:
+                subprocess.run(["whisper", "--help"], capture_output=True, timeout=5)
+                return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return False
+        return False
+
+
+def _fallback_text(audio_data):
+    return f"[Audio captured: {len(audio_data)} bytes]"
