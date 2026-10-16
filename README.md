@@ -1,4 +1,6 @@
-# voice
+# bluebox
+
+`cereal killer...as in fruit loops?!?`
 
 Local speech tools for macOS (Apple silicon), with a Linux path for the input device app.
 
