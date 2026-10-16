@@ -1,12 +1,12 @@
 [Unit]
-Description=Voice daemon (local TTS + STT on 127.0.0.1:8740)
-Documentation=file:%h/repos/voice/README.md
+Description=BlueBox daemon (local TTS + STT on 127.0.0.1:8740)
+Documentation=file:%h/repos/bluebox/README.md
 After=network.target sound.target
 
 [Service]
 Type=simple
 # %h = home directory, so this works for any user without editing.
-ExecStart=/usr/bin/env python3 %h/repos/voice/voice_daemon.py
+ExecStart=/usr/bin/env python3 %h/repos/bluebox/voice_daemon.py
 Restart=on-failure
 RestartSec=3
 

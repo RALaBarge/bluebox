@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.voice.daemon</string>
+  <string>com.bluebox.daemon</string>
 
   <key>ProgramArguments</key>
   <array>
     <string>/usr/bin/env</string>
     <string>python3</string>
-    <string>REPLACE_ME/repos/voice/voice_daemon.py</string>
+    <string>REPLACE_ME/repos/bluebox/voice_daemon.py</string>
   </array>
 
   <!-- launchd starts services with a minimal PATH. The pipeline shells out to
@@ -32,8 +32,8 @@
   </dict>
 
   <key>StandardOutPath</key>
-  <string>/tmp/voice-daemon.log</string>
+  <string>/tmp/bluebox-daemon.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/voice-daemon.err</string>
+  <string>/tmp/bluebox-daemon.err</string>
 </dict>
 </plist>
