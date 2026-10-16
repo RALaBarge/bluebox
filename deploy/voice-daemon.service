@@ -1,0 +1,24 @@
+[Unit]
+Description=Voice daemon (local TTS + STT on 127.0.0.1:8740)
+Documentation=file:%h/repos/voice/README.md
+After=network.target sound.target
+
+[Service]
+Type=simple
+# %h = home directory, so this works for any user without editing.
+ExecStart=/usr/bin/env python3 %h/repos/voice/voice_daemon.py
+Restart=on-failure
+RestartSec=3
+
+# The daemon binds loopback only and needs no privileges. Deliberately NOT
+# using PrivateDevices or RestrictAddressFamilies=AF_UNIX: it needs
+# /dev/snd for playback and capture.
+NoNewPrivileges=true
+ProtectSystem=full
+
+# ydotool/wtype/xdotool talk to the session, not to systemd, so nothing here
+# grants input access — the *client* (dictate) needs the group membership.
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

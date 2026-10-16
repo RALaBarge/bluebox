@@ -24,12 +24,18 @@ class STTEngine:
         return None
 
     def _transcribe_remote(self, audio_data: bytes, sample_rate: int) -> Optional[str]:
+        """POST WAV bytes to the voice daemon's /transcribe.
+
+        Returns None on failure rather than an error string: callers must not
+        type "[STT error: ...]" into the user's focused window, which is what
+        the previous version did.
+        """
         if not self.server_url:
-            return "[No STT server configured]"
+            return None
         try:
             import soundfile as sf
         except ImportError:
-            return _fallback_text(audio_data)
+            return None
         try:
             temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
             try:
@@ -37,7 +43,7 @@ class STTEngine:
             except Exception:
                 temp.close()
                 os.unlink(temp.name)
-                return _fallback_text(audio_data)
+                return None
             temp.close()
 
             with open(temp.name, "rb") as f:
@@ -52,17 +58,19 @@ class STTEngine:
             )
             with urllib.request.urlopen(req, timeout=30) as resp:
                 result = json.loads(resp.read().decode())
-                return result.get("text")
+                text = result.get("text")
+                return text.strip() if text else None
         except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError,
                 OSError, subprocess.CalledProcessError) as e:
-            return f"[STT error: {e}]"
+            print(f"[stt] remote transcription failed: {e}")
+            return None
 
     def _transcribe_whisper_local(self, audio_data: bytes, sample_rate: int) -> Optional[str]:
         try:
             import soundfile as sf
-            import numpy as np
         except ImportError:
-            return "[Install soundfile + numpy for local Whisper]"
+            print("[stt] local whisper needs soundfile")
+            return None
 
         temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         sf.write(temp.name, audio_data, sample_rate)
@@ -75,17 +83,22 @@ class STTEngine:
             )
             if result.returncode == 0:
                 data = json.loads(result.stdout)
-                return data.get("text", "").strip()
-            return f"[Whisper error: {result.stderr.strip()}]"
+                text = data.get("text", "").strip()
+                return text or None
+            print(f"[stt] whisper failed: {result.stderr.strip()[:200]}")
+            return None
         except FileNotFoundError:
-            return "[Whisper CLI not found — install openai-whisper]"
+            print("[stt] whisper CLI not found — install openai-whisper")
+            return None
         except subprocess.TimeoutExpired:
-            return "[Whisper timed out]"
+            print("[stt] whisper timed out")
+            return None
         finally:
             os.unlink(temp.name)
 
     def _transcribe_vosk(self, audio_data: bytes, sample_rate: int) -> Optional[str]:
-        return "[Vosk not yet implemented]"
+        print("[stt] vosk engine not implemented")
+        return None
 
     def is_available(self) -> bool:
         if self.engine_type == "remote_server" and self.server_url:
@@ -100,4 +113,9 @@ class STTEngine:
 
 
 def _fallback_text(audio_data):
-    return f"[Audio captured: {len(audio_data)} bytes]"
+    """Deprecated: previously returned a fake transcript placeholder.
+
+    No longer used — a failed transcription returns None so callers can skip
+    delivery instead of typing a placeholder into the user's window.
+    """
+    return None

@@ -46,7 +46,7 @@ from .stt import STTEngine
 R1_VID = 0x004C
 R1_PID = 0x014C
 PTT_DEFAULT = 0x20   # central analogue / talk button (momentary)
-STT_URL = "http://127.0.0.1:8741"
+STT_URL = "http://127.0.0.1:8740"   # unified daemon: /transcribe and /say
 TTS_URL = "http://127.0.0.1:8740"
 SAMPLE_RATE = 16000
 SILENCE_RMS = 0.012

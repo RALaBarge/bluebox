@@ -1,9 +1,32 @@
 import platform
 import subprocess
+import sys
 import time
 import shutil
+from pathlib import Path
 
 _IS_MACOS = platform.system() == "Darwin"
+
+# delivery.py lives at the repo root; this app runs from finger_mouse_stt_app/,
+# so the root isn't on sys.path by default.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_delivery():
+    """Import the shared delivery module, or None if unavailable.
+
+    Returns None rather than raising so a broken import degrades to 'text not
+    delivered' instead of killing the HID event loop.
+    """
+    try:
+        if str(_REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(_REPO_ROOT))
+        import delivery
+        return delivery
+    except ImportError as e:
+        print(f"[typer] delivery module unavailable ({e}); "
+              "text will not be delivered")
+        return None
 
 if _IS_MACOS:
     from .typer_macos import (
@@ -22,8 +45,6 @@ if _IS_MACOS:
         return insert_text_macos(text, target_window_title)
 
 else:
-    _TOOLS = ["ydotool", "xdotool", "wtype", "xclip"]
-
     _XDOTOOL_BIN = shutil.which("xdotool")
 
     def get_open_windows():
@@ -91,44 +112,19 @@ else:
         return type_text(text)
 
     def type_text(text: str):
-        for tool in _TOOLS:
-            path = shutil.which(tool)
-            if not path:
-                continue
+        """Delegate to delivery.py, which owns text delivery for the repo.
 
-            try:
-                if tool == "ydotool":
-                    subprocess.run(
-                        [path, "type", text],
-                        stderr=subprocess.DEVNULL,
-                        timeout=5,
-                    )
-                elif tool == "xdotool":
-                    subprocess.run(
-                        [path, "type", "--clearmodifiers", text],
-                        stderr=subprocess.DEVNULL,
-                        timeout=5,
-                    )
-                elif tool == "wtype":
-                    subprocess.run(
-                        [path, text],
-                        stderr=subprocess.DEVNULL,
-                        timeout=5,
-                    )
-                elif tool == "xclip":
-                    p = subprocess.Popen(
-                        [path, "-selection", "clipboard"],
-                        stdin=subprocess.PIPE,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    p.communicate(input=text.encode(), timeout=5)
-                    subprocess.run(
-                        [shutil.which("xdotool") or "true",
-                         "key", "--clearmodifiers",
-                         "ctrl+v"],
-                        stderr=subprocess.DEVNULL,
-                        timeout=5,
-                    )
-                return
-            except (subprocess.CalledProcessError, FileNotFoundError, OSError):
-                continue
+        This used to carry its own copy of the tool chain, with two bugs the
+        shared module doesn't have: `ydotool type <text>` and `wtype <text>`
+        were called without a `--` separator, so a transcript beginning with
+        a dash was parsed as a flag; and there was no clipboard save/restore.
+        Window activation stays here — delivery.py deliberately doesn't know
+        about windows.
+        """
+        delivery = _load_delivery()
+        if delivery is None:
+            return False
+        ok, note = delivery.insert(text, "paste")
+        if not ok:
+            print(f"[typer] delivery failed: {note}")
+        return ok

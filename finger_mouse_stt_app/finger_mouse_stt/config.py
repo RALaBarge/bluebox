@@ -24,7 +24,10 @@ class AppConfig:
     selected_device: str = ""
     mappings: list = field(default_factory=list)
     default_stt_engine: str = "remote_server"
-    default_stt_server_url: str = "http://127.0.0.1:8741"
+    # The unified voice daemon (voice_daemon.py) serves /transcribe on 8740,
+    # the same process that serves /say. It used to be a separate stt_server
+    # on 8741 holding a second copy of the model.
+    default_stt_server_url: str = "http://127.0.0.1:8740"
     audio_device: Optional[str] = None
     audio_sample_rate: int = 16000
 

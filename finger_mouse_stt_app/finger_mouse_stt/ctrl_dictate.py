@@ -27,7 +27,7 @@ import Quartz
 
 from .stt import STTEngine
 
-STT_URL = "http://127.0.0.1:8741"
+STT_URL = "http://127.0.0.1:8740"
 SAMPLE_RATE = 16000
 LOG_FILE = "/tmp/ctrl_dictate.log"
 DOUBLE_TAP_MS = 0.45   # two Control presses this close = a double-tap (toggles)
