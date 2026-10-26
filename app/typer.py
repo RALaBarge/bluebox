@@ -7,9 +7,9 @@ from pathlib import Path
 
 _IS_MACOS = platform.system() == "Darwin"
 
-# delivery.py lives at the repo root; this app runs from finger_mouse_stt_app/,
-# so the root isn't on sys.path by default.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# delivery.py lives at the repo root; this file is app/typer.py, so the root
+# is one level up and isn't on sys.path by default.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _load_delivery():

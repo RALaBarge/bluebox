@@ -2,13 +2,14 @@
 
 `cereal killer...as in fruit loops?!?`
 
-Local speech tools for macOS (Apple silicon), Debian-family Linux, and Windows 11.
+Local speech tools for macOS (Apple silicon), Debian-family and other Linux,
+Windows 11, and — wired up but untested — the BSDs.
 
 **Generate the tones. Seize the trunk.**
 
 The blue box was a tone generator: it played precise frequencies into a
 handset and made the network do things it wasn't designed to do. This is the
-same trick pointed at your own machine, it generates speech and injects it
+same trick pointed at your own machine — it generates speech and injects it
 into the input path, and it listens on the way back in.
 
 -=-~~~ Gr33ts to Captn'Crunch, Kevin Mitnick, and EFNet! ~~~-=-
@@ -18,10 +19,10 @@ into the input path, and it listens on the way back in.
 | `voice_daemon.py` | The warm daemon on `127.0.0.1:8740`. Both directions: `/say` queues text to be spoken, `/transcribe` takes audio in. Models load once. |
 | `say.py` | Stdlib-only client for the daemon. Fails soft: if the daemon is down it warns and exits 0, so `./say` never breaks the pipeline that called it. |
 | `dictate.py` | Push-to-talk. Records the mic, transcribes (via the daemon), delivers text to the focused window. |
-| `hotkey.py` | Tap-Ctrl dictation (needs `pynput`; X11 on Linux): tap Ctrl to start recording, tap again to stop, transcribe and type the text into the focused window. `--paste`/`--clipboard` change delivery. |
-| `delivery.py` | The platform layer: clipboard, paste chord, keystroke. macOS, Linux, and Windows. |
-| `platform_speech.py` | Backend selection â€” which TTS and which STT engine this box can actually run. |
-| `finger_mouse_stt_app/` | PyQt6 app mapping HID device buttons to speech-to-text and window actions (evdev on Linux, hidapi on macOS). Its `typer.py` delegates text insertion to `delivery.py` and keeps only window activation. |
+| `hotkey.py` | Tap-Ctrl dictation (needs `pynput`; X11 only on Linux): tap Ctrl to start recording, tap again to stop, transcribe and type into the focused window. `--paste`/`--clipboard` change delivery. |
+| `delivery.py` | The platform layer: clipboard, paste chord, keystroke. macOS, Linux, Windows, and the BSDs. |
+| `platform_speech.py` | Backend selection — which TTS and which STT engine this box can actually run. |
+| `app/` | **Optional, and nothing at the root imports it.** One flat package (PyQt6; evdev on Linux, hidapi on macOS) mapping HID device buttons to speech-to-text and window actions. It consumes the daemon's `/transcribe` and delegates text insertion to `delivery.py`, keeping only window activation. Entry points: `python3 -m app.main` (GUI), `-m app.ctrl_dictate` (macOS Ctrl-tap), `-m app.r1_daemon` (headless R1 buttons), `-m app.sniff_r1` (HID diagnostics). |
 
 ```sh
 python3 voice_daemon.py &        # one process, both directions
@@ -32,6 +33,48 @@ python3 voice_daemon.py &        # one process, both directions
 python3 hotkey.py                # tap Ctrl to start recording, tap Ctrl again to finish
 ```
 
+## Platforms
+
+The same Python runs everywhere; nothing is compiled, and every backend is
+probed at startup, so a box that only has half the story still starts.
+
+| Platform | Speech out | Speech in | Text delivery | Status |
+|---|---|---|---|---|
+| macOS (Apple silicon) | `mlx-audio` (Kokoro-82M) → `say` | `parakeet-mlx` → faster-whisper → whisper.cpp | `pbcopy` + `osascript` | supported |
+| Linux (X11) | `kokoro-onnx` / `piper` / `espeak-ng` | faster-whisper / whisper.cpp | `xdotool` / `xclip` | supported, verified |
+| Linux (Wayland) | as X11 | as X11 | `ydotool` / `wtype` / `wl-copy` | supported — typing verified, paste unverified |
+| Windows 11 | SAPI via PowerShell | faster-whisper / whisper.cpp | `SendInput` + Win32 clipboard | supported, verified |
+| FreeBSD / OpenBSD / NetBSD | `espeak-ng` / `piper` | whisper.cpp (faster-whisper if you can get it) | `xdotool` / `xclip` | **wired up, never run on hardware** |
+
+Windows is the odd one out in a good way: it needs no external tools at all,
+because the clipboard and keystrokes come from `user32` via `ctypes`, which
+ships with Python. The BSDs are the closest fit to Linux — they share the
+`xdotool`/`xclip` path, `espeak-ng` and `piper` are in ports, and whisper.cpp
+builds from source.
+
+The HID app is macOS/Linux only: `evdev` does not exist on BSD, so `device.py`
+reports no devices there instead of crashing. `hidapi` is in ports if you ever
+want to add a BSD backend — the macOS backend is already the HID-shaped one.
+Its dependencies are separate from the daemon's:
+
+```sh
+pip install -r app/requirements.txt
+python3 -m app.main            # GUI, from the repo root
+```
+
+`hotkey.py` is the lightweight hotkey path, and the one most people want:
+`pynput` on macOS and Windows, **X11 only on Linux** — Wayland gives an app no
+global key access at all, so there you bind `dictate --auto` in your desktop
+settings instead.
+
+## Why one daemon
+
+It used to be two (`tts_daemon.py` on :8740, `stt_server.py` on :8741) holding
+two copies of the world, and `dictate.py` loaded its own model on every single
+invocation. Now there is one process, one model cache, one port. Transcription
+does not queue — overlapping transcription is fine and stays parallel — only
+speech queues, because two sessions talking over each other is genuinely bad.
+
 ## Backends
 
 Chosen at startup from what's installed. Nothing is imported until needed, so a
@@ -39,8 +82,8 @@ box with only speech-out still runs.
 
 | | First choice | Falls back to |
 |---|---|---|
-| **TTS** | `mlx-audio` (Kokoro-82M) on Apple silicon | `kokoro-onnx` â†’ `piper` â†’ macOS `say` / `spd-say` / `espeak-ng` |
-| **STT** | `parakeet-mlx` on Apple silicon | `faster-whisper` â†’ `whisper.cpp` â†’ `openai-whisper` CLI |
+| **TTS** | `mlx-audio` (Kokoro-82M) on Apple silicon | `kokoro-onnx` → `piper` → macOS `say` / `spd-say` / `espeak-ng` |
+| **STT** | `parakeet-mlx` on Apple silicon | `faster-whisper` → `whisper.cpp` → `openai-whisper` CLI |
 
 Run `python3 platform_speech.py` to see what this machine picked.
 
@@ -54,29 +97,36 @@ platform needs a different mechanism:
 | macOS | `pbcopy`/`pbpaste` | `osascript` Cmd-V | `osascript keystroke` |
 | Linux (X11) | `xclip` | `xdotool key ctrl+v` | `xdotool type` |
 | Linux (Wayland) | `wl-copy`/`wl-paste` | `ydotool` / `wtype` | `ydotool` / `wtype` |
+| BSD (X11) | `xclip` | `xdotool key ctrl+v` | `xdotool type` |
 | Windows | `ctypes` (CF_UNICODETEXT), `clip.exe` fallback | `SendInput` Ctrl-V | `SendInput` Unicode scancodes |
 
-Windows needs **no external tools** as `SendInput` and the clipboard come from
+Windows needs **no external tools** — `SendInput` and the clipboard come from
 `user32` via `ctypes`, which ships with Python. Typing uses
 `KEYEVENTF_UNICODE` scancodes rather than virtual keys, so text is not
 affected by the active keyboard layout and any character the target can
 display can be sent.
 
-One asymmetry worth knowing: on X11 `insert()` can detect that no window has
-focus and refuse, because `getactivewindow` returns empty. Windows doesnt have this issue...there is always *a* foreground window â€” so `have_delivery()` reports
-the foreground window's title instead, and it is worth checking that the app
-you expect is actually in front. `SetForegroundWindow` is refused unless the
-calling process already owns the foreground, so a script cannot reliably
-bring a window forward before dictating.
+One asymmetry worth knowing: on X11 `insert()` can tell that no window has
+focus, because `XGetInputFocus` reports `None` or `PointerRoot`. It does not
+simply give up: it re-focuses the last window it delivered to and only reports
+failure if that window is gone or refuses the activation. The id is kept in
+`$XDG_RUNTIME_DIR/bluebox-last-window` precisely because `dictate.py` is a new
+process every run, so in-memory state would never survive to be useful.
+Windows has no such signal — there is always *a* foreground window — so
+`have_delivery()` reports the foreground window's title instead, and it is
+worth checking that the app you expect is actually in front.
+`SetForegroundWindow` is refused unless the calling process already owns the
+foreground, so a script cannot reliably bring a window forward before
+dictating.
 
 ## Debian / Ubuntu setup
 
 ```sh
-# STT the one thing you actually need
+# STT — the one thing you actually need
 sudo apt install python3-pip ffmpeg
 pip install faster-whisper "av<19" sounddevice soundfile numpy
 #   IMPORTANT: the "av<19" pin is not optional. faster-whisper 1.2.1 calls
-#   av.open(metadata_errors=...), which av 19.x removed without the pin
+#   av.open(metadata_errors=...), which av 19.x removed — without the pin
 #   every transcription dies with "TypeError: open() got an unexpected
 #   keyword argument 'metadata_errors'". Verified on Debian 13 (trixie).
 #   first run downloads the model; VOICE_WHISPER_SIZE=base.en is the default
@@ -85,11 +135,11 @@ pip install faster-whisper "av<19" sounddevice soundfile numpy
 # Tap-Ctrl hotkey (optional, hotkey.py)
 pip install pynput
 
-# TTS â€” pick one
+# TTS — pick one
 pip install kokoro-onnx          # closest to the macOS Kokoro voices
 # or: sudo apt install espeak-ng  # no model download, robotic but instant
 
-# Text delivery â€” pick one, matching your session type
+# Text delivery — pick one, matching your session type
 sudo apt install ydotool         # Wayland or X11; needs ydotoold running
 sudo apt install wtype           # wlroots Wayland (Sway, Hyprland, sway-based)
 sudo apt install xdotool xclip   # X11
@@ -117,16 +167,46 @@ under WSL, with `espeak-ng` for TTS):
 ```
 platform : Linux
 session  : wayland
-delivery : OK â€” Linux via ydotool, wtype, xdotool
+delivery : OK — Linux via ydotool, wtype, xdotool
 tts      : system (espeak-ng)
 stt      : faster-whisper (base.en, cpu)
-daemon   : up â€” tts=system (espeak-ng) stt=faster-whisper
+daemon   : up — tts=system (espeak-ng) stt=faster-whisper
 ```
 
 `stt` may report `cuda` if a GPU is visible. If the CUDA libraries aren't
 actually installed, the first transcription logs a fallback and switches to
-CPU automatically rather than crashing WSL triggers this, since it exposes
+CPU automatically rather than crashing — WSL triggers this, since it exposes
 the GPU without shipping the CUDA runtime.
+
+## FreeBSD / OpenBSD / NetBSD setup
+
+**This has not been run on a BSD.** It is here because the code paths line up,
+not because it was observed working. The shape of it:
+
+```sh
+pkg install python311 py311-soundfile espeak-ng xdotool xclip ffmpeg
+```
+
+```sh
+# STT: whisper.cpp is the reliable path — there is no ctranslate2 wheel for
+# BSD, so faster-whisper usually loses. Build whisper.cpp (or install it from
+# ports if your tree has it), then point the backend at a model:
+export WHISPER_CPP_MODEL=/path/to/ggml-base.en.bin
+python3 dictate.py --check      # expect: delivery : OK — FreeBSD via xdotool
+```
+
+- `delivery.py` treats the BSDs as one family with Linux — same X11 tools, no
+  `pbcopy`/`osascript` — so `have_delivery()` reports
+  `FreeBSD via xdotool, xclip` instead of `unsupported platform`.
+- `platform_speech.py` needed no changes at all: it already falls through to
+  `espeak-ng`/`spd-say` for TTS and to whisper.cpp/openai-whisper for STT.
+- The least certain part is **audio capture**. `sounddevice` needs a working
+  backend (`sndio`/`OSS`/`pulse` varies by BSD and by build), so check that
+  before blaming the rest:
+
+  ```sh
+  python3 -c "import sounddevice; print(sounddevice.query_devices())"
+  ```
 
 ## Running it as a service
 
@@ -162,7 +242,8 @@ GET  /status      queue depth, now playing, backends, counters
 GET  /health      {"ok": true, ...}
 ```
 
-Loopback only, no auth because it's a local speech device, not a service.
+Loopback only, no auth — it's a local speech device, not a service. Anything
+that can already run code as you can also just play audio.
 
 ## Platform notes
 
@@ -175,52 +256,62 @@ transcript instead of exiting silently.
 **Permissions.** macOS asks for Microphone + Accessibility (and Input
 Monitoring for the HID app) on first run. On Linux, `ydotool` needs the
 `input` group and a running `ydotoold`; `wtype`/`xdotool` must be run inside
-the graphical session they're typing into â€” from a bare SSH shell they will
+the graphical session they're typing into — from a bare SSH shell they will
 fail, which is expected and not a bug in this repo.
 
 **Recording.** `--auto` stops after ~1.2s of silence (`SILENCE_RMS`,
 `SILENCE_SECS` in `dictate.py` are the knobs). Without it, press Enter to stop.
-Hold-to-talk with a real hotkey is what `finger_mouse_stt_app/` is for.
+For a real hotkey, `hotkey.py` taps Ctrl; `app/` goes further with HID buttons
+and window switching.
 
 ## Known gaps
 
-- `hotkey.py` (tap Ctrl) has been used on Windows 11 only. The macOS path
-  (needs Input Monitoring permission) and Linux X11 path are untested, and it
-  cannot see keys under Wayland. I did have a similar too I built under MacOS, but this does not share any of that code.
+- **`hotkey.py` is verified on Windows 11 only.** The macOS path (needs Input
+  Monitoring) and the Linux X11 path are untested, and it cannot see keys at
+  all under Wayland. It is a fresh implementation — no code is shared with the
+  earlier macOS HID app.
+- **BSD is untested.** `delivery.py` takes the same X11 path as Linux and
+  `platform_speech.py` needed no changes, but nobody has run this on a BSD —
+  read the platform table as "should work", not "does".
+- **Windows paste is unverified as a whole.** The clipboard and the
+  `SendInput` keystroke are each verified independently (see below); the
+  two-step paste in one motion was not. `--type` is verified end-to-end.
 - `--say` playback confirmation is not wired: the old `SUPPRESS_WORDS` /
   `SILENCE_CONFIRMATIONS` constants were dead code and have been removed
   rather than reimplemented.
 - The HID app's `vosk` engine is a stub that returns `None`.
 - **Paste is unverified on Linux.** Typing is verified end-to-end on real
-  Debian (see below), but every paste chord tried (Ctrl+V, Ctrl+Shift+V,
-  Shift+Insert, middle-click) failed to land in the test target, *including*
+  Debian (see below), but every paste chord tried — Ctrl+V, Ctrl+Shift+V,
+  Shift+Insert, middle-click — failed to land in the test target, *including*
   with the selection owned by a live process for the duration. That is a
   property of the test environment (WSLg's X server plus xterm), not
   necessarily of your desktop. On a normal GNOME/KDE/wlroots session paste is
   expected to work, but it has not been observed working. If paste does not
   land, use `dictate --type`, which is verified.
 
-## Windows tested atm only, these tests have passed:
+## What has been verified, and where
 
-Tested by running:
+Tested by running, not by reading:
 
 | Check | Environment | Result |
 |---|---|---|
 | `type` injection into a focused window | Debian 13 / WSLg X11 | **4/4 verified** by filesystem side effect |
 | `type` injection into a focused window | Windows 11 | **4/4 verified** by filesystem side effect |
-| Unicode typed text | Windows 11 | **verified** â€” `Ã¼Ã±Ã¯Ã§Ã¸de ä¸­æ–‡ Ñ‚ÐµÑÑ‚` arrived intact |
-| Dash-leading text (`--help -rf /`) | Debian 13, Windows 11 | **verified** â€” arrives as one argument |
+| Unicode typed text | Windows 11 | **verified** — `üñïçøde 中文 тест` arrived intact |
+| Dash-leading text (`--help -rf /`) | Debian 13, Windows 11 | **verified** — arrives as one argument |
 | Clipboard write + read round-trip | Debian 13, Windows 11 | **verified** (unicode, newlines, tabs) |
-| Real speech â†’ transcription through the daemon | Debian 13 | **verified** â€” espeak-ng phrase transcribed correctly |
-| CUDA â†’ CPU fallback when CUDA libs are missing | Debian 13 / WSLg | **verified** â€” logs the fallback, then succeeds |
-| Tap-Ctrl start/stop dictation (`hotkey.py`) | Windows 11 | **verified** — real mic, daemon transcription, typed into the focused window |
+| Real speech → transcription through the daemon | Debian 13 | **verified** — espeak-ng phrase transcribed correctly |
+| CUDA → CPU fallback when CUDA libs are missing | Debian 13 / WSLg | **verified** — logs the fallback, then succeeds |
 | CUDA → CPU fallback when CUDA libs are missing | Windows 11 | **verified** — `cublas64_12.dll` error falls back to CPU; SAPI phrase transcribed correctly through the daemon |
+| Tap-Ctrl start/stop dictation (`hotkey.py`) | Windows 11 | **verified** — real mic, daemon transcription, typed into the focused window |
 | HTTP surface and error codes | Debian 13 + Windows | **verified** (200/400/404 as documented) |
-| No-focus detection and honest failure | Debian 13 | **verified** â€” reports failure with a fix suggestion instead of false success |
+| No-focus detection and honest failure | Debian 13 | **verified** — reports failure with a fix suggestion instead of false success |
+| Re-focusing the last target when focus is lost | simulated `xdotool` | **logic verified with fakes** — reactivates then pastes; honest error when the window is gone or refuses focus; never activates while something already has focus |
 | Paste (`Ctrl+V`) into a focused window | Debian 13 / WSLg | **not working in this environment**; typing works, so the cause is likely WSLg's X server rather than the chord |
 | Paste (`Ctrl+V`) into a focused window | Windows 11 | **not directly verified**; the clipboard and `SendInput` halves are both verified independently |
-| Live microphone capture | â€” | **not tested** â€” WSL exposes no usable input device |
-| macOS paths | â€” | **not re-tested**; changed only via the shared `_run`/clipboard helpers |
+| Live microphone capture | — | **not tested** — WSL exposes no usable input device |
+| macOS paths | — | **not re-tested**; changed only via the shared `_run`/clipboard helpers |
+| BSD delivery branch | simulated `platform.system()` for FreeBSD/OpenBSD/NetBSD | **wiring verified in simulation** — reports `FreeBSD via …` instead of "unsupported platform"; no BSD hardware was involved |
 
 ### Linux gotchas found by testing
 
@@ -243,10 +334,10 @@ the code:
    wants it must ask for `capture=True`. This was the hardest one to find:
    the write "succeeded" from the tool's point of view, the failure was
    swallowed by a broad `except`, and the only symptom was that *paste* did
-   not work â€” several steps away from the cause.
+   not work — several steps away from the cause.
 4. **`WAYLAND_DISPLAY` being set does not mean Wayland.** WSLg sets
    `WAYLAND_DISPLAY=wayland-0` next to a fully working X server on `DISPLAY=:0`,
-   with no wlroots compositor behind the Wayland socket â€” so `wtype` fails with
+   with no wlroots compositor behind the Wayland socket — so `wtype` fails with
    "Compositor does not support the virtual keyboard protocol". The session
    check now probes whether X is actually reachable before choosing.
 5. **`ydotool` exits 0 without typing.** With a mismatched seat or no
@@ -255,9 +346,13 @@ the code:
    trustworthy, and only falls back to `ydotool`.
 6. **Focus can vanish on a live X session.** A window manager restart (or
    WSLg losing focus) leaves an X session where every delivery tool exits 0
-   and text goes nowhere. `insert()` now detects this and reports failure with
-   an actionable message instead of claiming success. `--clipboard` still
-   works, because copying needs no focus.
+   and text goes nowhere. `insert()` detects it by asking `XGetInputFocus`
+   (not just `_NET_ACTIVE_WINDOW`, which a non-EWMH WM never maintains and
+   which therefore produced false "no focus" verdicts), then re-focuses the
+   last window it delivered to. Only if that window is gone, or the WM
+   refuses the activation, does it report failure — with an actionable
+   message instead of claiming success. `--clipboard` still works, because
+   copying needs no focus.
 
 ### Windows gotchas found by testing
 
@@ -269,13 +364,13 @@ the code:
    between working and not.
 8. **`SetForegroundWindow` is refused from a background process.** During
    testing a script tried to focus Notepad, was silently denied, and the
-   keystrokes landed in whatever window *was* in front. Nothing was harmed â€”
-   they were Ctrl-A/Ctrl-C â€” but it is a real hazard: always confirm the
+   keystrokes landed in whatever window *was* in front. Nothing was harmed —
+   they were Ctrl-A/Ctrl-C — but it is a real hazard: always confirm the
    foreground title before sending text, which is why `have_delivery()`
    reports it.
 9. **Never trust a write-then-immediately-read clipboard test.** Reading
    straight after writing races clipboard propagation and fails
-   non-deterministically â€” different cases failed on different runs. The
+   non-deterministically — different cases failed on different runs. The
    shipped `insert()` already waits between write and keystroke; a test that
    skips the wait is testing itself, not the code.
 

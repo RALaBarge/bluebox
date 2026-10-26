@@ -1,8 +1,8 @@
 #!/usr/bin/env python3.12
 """Voice daemon — one warm process for speech in and speech out.
 
-Replaces the old split (tts_daemon.py on :8740 + finger_mouse_stt_app's
-stt_server.py on :8741), which loaded two copies of the world and meant
+Replaces the old split (tts_daemon.py on :8740 + the HID app's stt_server.py
+on :8741), which loaded two copies of the world and meant
 dictation paid a cold model load on every single invocation.
 
     POST /say        {"text": "...", "voice": "af_heart", "speed": 1.0,
@@ -271,7 +271,7 @@ class Handler(BaseHTTPRequestHandler):
         fmt = "wav"
         audio = body
 
-        # Two shapes: raw WAV bytes (what finger_mouse_stt posts) or JSON with
+        # Two shapes: raw WAV bytes (what app/stt.py posts) or JSON with
         # base64, which is easier to send from shells that dislike binary.
         if "json" in ctype or body.lstrip()[:1] == b"{":
             try:

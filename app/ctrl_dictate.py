@@ -10,7 +10,7 @@ local STT server and pastes into the window that was frontmost when you started.
   tap again    -> stop, transcribe, paste into the captured target window
                  (silent on success; double low beep if transcription failed)
 
-Run:  .venv/bin/python3.12 -m finger_mouse_stt.ctrl_dictate
+Run:  python3 -m app.ctrl_dictate
 """
 import json
 import os

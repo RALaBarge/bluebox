@@ -1,16 +1,18 @@
 #!/usr/bin/env python3.12
 """Cross-platform text delivery: get the transcript into the focused window.
 
-One API for both platforms, stdlib-only, no imports that don't exist on the
-other OS:
+One API for every supported platform, stdlib-only, no imports that don't exist
+on the others:
 
     insert(text, mode="paste")   -> paste (clipboard + synthetic Cmd/Ctrl-V)
     insert(text, mode="type")    -> keystroke the text
     insert(text, mode="clipboard")-> clipboard only, no keystroke
     have_delivery()              -> (bool, reason) can we deliver at all?
 
-macOS uses pbcopy/pbpaste + osascript. Linux uses whatever's installed, in
-preference order, because no single tool covers both Wayland and X11:
+macOS uses pbcopy/pbpaste + osascript. Windows uses SendInput and the Win32
+clipboard via ctypes, so it needs no external tools. Linux and the BSDs use
+whatever's installed, in preference order, because no single tool covers both
+Wayland and X11:
 
     ydotool    wayland (and X11), needs ydotoold running
     wtype      wlroots Wayland, native typing
@@ -32,6 +34,7 @@ call.
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
@@ -46,6 +49,12 @@ import ctypes
 IS_MACOS = platform.system() == "Darwin"
 IS_LINUX = platform.system() == "Linux"
 IS_WINDOWS = platform.system() == "Windows"
+# The BSDs share the Unix/X11 command-line tooling path with Linux: xdotool,
+# xclip and wl-copy are all in ports, and there is no pbcopy/osascript. They
+# are treated as one family rather than four cases; only the reported label
+# differs.
+IS_BSD = platform.system() in ("FreeBSD", "OpenBSD", "NetBSD", "DragonFly")
+IS_UNIX_DESKTOP = IS_LINUX or IS_BSD
 
 # How long to wait after placing the clipboard before sending the paste key.
 # Too short and the key arrives before the clipboard is populated, which is the
@@ -580,22 +589,21 @@ def have_delivery() -> tuple[bool, str]:
             note += f" (foreground: {title[:40]!r})"
         return True, note
 
-    if IS_LINUX:
+    if IS_UNIX_DESKTOP:
+        os_name = platform.system()
         found = [t for t in ("ydotool", "wtype", "xdotool") if _which(t)]
         if not found:
-            return False, ("Linux: no input tool found — install one of "
+            return False, (f"{os_name}: no input tool found — install one of "
                            "ydotool (Wayland/X11), wtype (wlroots), "
                            "or xdotool (X11)")
-        note = "Linux via " + ", ".join(found)
-        if _x11_usable():
-            # Tell the caller whether a target exists, since that determines
-            # whether insert() can do anything.
-            r = subprocess.run(["xdotool", "getactivewindow"],
-                               capture_output=True, text=True, timeout=3) \
-                if _which("xdotool") else None
-            if r is not None and not r.stdout.strip():
-                note += " — WARNING: no focused window on X11, delivery will " \
-                        "go nowhere (click a window first)"
+        note = f"{os_name} via " + ", ".join(found)
+        if _x11_usable() and _no_focus_expected():
+            # A target may still exist: insert() can reactivate the last
+            # window it delivered to, so report that rather than just warning.
+            note += (" — WARNING: no focused window on X11; will try the "
+                     "last window delivered to")
+            if _recall_target() is None:
+                note += " (none remembered — click a window)"
         return True, note
 
     return False, f"unsupported platform: {platform.system()}"
@@ -607,19 +615,124 @@ def _no_focus_expected() -> bool:
     Observed in WSLg: the session is alive, every tool exits 0, and text is
     delivered into the void because no window holds focus. Reporting success
     there is worse than reporting failure, since the caller then believes the
-    transcript landed. We can detect the condition but not fix it — granting
-    focus is the window manager's job.
+    transcript landed.
+
+    Two probes, because they fail differently. `getactivewindow` reads the
+    EWMH `_NET_ACTIVE_WINDOW` property, which a non-EWMH window manager never
+    maintains even while something genuinely has focus — so an empty answer
+    from it alone is not proof of anything, and the old version of this
+    function refused to deliver in cases where delivery would have worked.
+    `getwindowfocus` is `XGetInputFocus`, which is authoritative: 0 (`None`)
+    and 1 (`PointerRoot`) are the real "nowhere" answers. Only when both
+    agree that no window is focused do we report it.
+
+    A probe error means "unknown", which is treated as "probably fine" — same
+    choice the previous single-probe version made.
     """
-    if not _x11_usable():
+    if not _x11_usable() or not _which("xdotool"):
         return False
+    try:
+        for probe in (["getactivewindow"], ["getwindowfocus"]):
+            r = subprocess.run(["xdotool"] + probe, capture_output=True,
+                               text=True, timeout=3)
+            wid = r.stdout.strip()
+            if wid.isdigit() and wid not in ("0", "1"):
+                return False
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+# --------------------------------------------------------------------------
+# last-target memory (X11)
+#
+# X11 has no focus history in the protocol: no server-side record of what was
+# focused before, and no cross-WM way to ask for an MRU list. So the only
+# honest meaning of "the last window" is "the last window *we* delivered to".
+# That covers the failure we actually see — focus lost to a WM restart, WSLg
+# dropping it, or a launcher stealing it — where the user just wants the
+# transcript to land where the previous one did.
+# --------------------------------------------------------------------------
+
+def _state_path() -> str:
+    """Where the last-delivered window id lives.
+
+    It has to survive between processes: dictate.py is a fresh process on
+    every invocation, which is exactly why in-memory state is useless here.
+    XDG_RUNTIME_DIR is per-user (0700) and cleared at logout — the lifetime we
+    want — with ~/.cache as the fallback for systems that don't set it.
+    """
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if not base or not os.path.isdir(base):
+        base = os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "bluebox-last-window")
+
+
+def _remember_target(wid: str) -> None:
+    """Record a window id. Best effort — losing this is not worth an error."""
+    try:
+        path = _state_path()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(wid)
+    except OSError:
+        pass
+
+
+def _recall_target() -> str | None:
+    """The last window we delivered to, if it still exists.
+
+    Existence is checked because X11 recycles window ids, and a stale id that
+    has been reused would aim the text at a stranger. That check cannot make
+    reuse impossible — a recycled window exists by definition — so treat this
+    as a heuristic. It is a better trade than refusing to deliver at all.
+    """
+    try:
+        with open(_state_path()) as f:
+            wid = f.read().strip()
+    except OSError:
+        return None
+    if not wid.isdigit():
+        return None
+    try:
+        r = subprocess.run(["xdotool", "getwindowname", wid],
+                           capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return wid if r.returncode == 0 else None
+
+
+def _activate_target(wid: str) -> bool:
+    """Ask the WM to focus a window, then confirm it actually did.
+
+    `windowactivate` sends `_NET_ACTIVE_WINDOW`, which is a request and not a
+    command: focus-stealing prevention and some WMs simply ignore it. Its exit
+    status therefore proves nothing, so focus is re-read afterwards.
+    """
     if not _which("xdotool"):
         return False
     try:
+        subprocess.run(["xdotool", "windowactivate", "--sync", wid],
+                       capture_output=True, text=True, timeout=5)
         r = subprocess.run(["xdotool", "getactivewindow"],
                            capture_output=True, text=True, timeout=3)
-        return not r.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return False
+    return r.stdout.strip() == wid
+
+
+def _remember_current_target() -> None:
+    """Store whatever is focused now, after a delivery that worked."""
+    if not _x11_usable() or not _which("xdotool"):
+        return
+    try:
+        r = subprocess.run(["xdotool", "getactivewindow"],
+                           capture_output=True, text=True, timeout=3)
+        wid = r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return
+    if wid.isdigit() and wid not in ("0", "1"):
+        _remember_target(wid)
 
 
 def insert(text: str, mode: str = "paste") -> tuple[bool, str]:
@@ -646,11 +759,24 @@ def insert(text: str, mode: str = "paste") -> tuple[bool, str]:
     # clipboard does not. Checking here rather than inside _type_text keeps
     # the "did it land" question in one place.
     if _no_focus_expected():
-        return False, ("no focused window — text would go nowhere "
-                       "(click a window, or use --clipboard to copy instead)")
+        # Nothing holds focus. Re-focus the window we delivered to last time
+        # and carry on. This only runs when focus is genuinely absent, so it
+        # cannot steal focus from a window the user is typing into — that is
+        # the whole risk of auto-activation, and it is why we do not do this
+        # when some other window merely isn't the one we expected.
+        wid = _recall_target()
+        if wid is None:
+            return False, ("no focused window — text would go nowhere "
+                           "(click a window, or use --clipboard to copy instead)")
+        if not _activate_target(wid):
+            return False, (f"no focused window, and the last target ({wid}) "
+                           "would not take focus — click a window")
+        time.sleep(_PASTE_SETTLE)
 
     if mode == "type":
         ok = _type_text(text)
+        if ok:
+            _remember_current_target()
         return ok, ("typed" if ok else "no typing tool available")
 
     # paste: save clipboard, put text there, send the chord, restore.
@@ -665,6 +791,7 @@ def insert(text: str, mode: str = "paste") -> tuple[bool, str]:
     time.sleep(_RESTORE_SETTLE)
     if old:
         _clipboard_write(old)
+    _remember_current_target()
     return True, "pasted"
 
 

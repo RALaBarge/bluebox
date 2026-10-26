@@ -27,7 +27,7 @@
 
 ## Project Structure
 
-- Single package `finger_mouse_stt/` with platform-dispatch at import time in `device.py` and `typer.py`.
+- Single flat package `app/` — no inner package directory — with platform-dispatch at import time in `device.py` and `typer.py`.
 - macOS backends in `_macos.py` files that are only imported on Darwin — avoids `hidapi`/`evdev` ImportError.
 - The `__init__.py` doesn't need to re-export; callers import directly from the submodules.
-- `main.py` is the entry point: just creates `QApplication` and shows `MainWindow`.
+- `main.py` is the GUI entry point, run as `python3 -m app.main`; it just creates `QApplication` and shows `MainWindow`.

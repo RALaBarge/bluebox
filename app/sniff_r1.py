@@ -6,7 +6,7 @@ after a reconnect renumbers the DevSrvsID path. Opens the device and prints
 every raw report it sees with a timestamp, so we can learn what each button
 and the finger-slide actually send.
 
-Run: .venv/bin/python3.12 sniff_r1.py [seconds]
+Run: python3 -m app.sniff_r1 [seconds]
 """
 import sys
 import time
