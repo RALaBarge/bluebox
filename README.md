@@ -32,14 +32,6 @@ python3 voice_daemon.py &        # one process, both directions
 python3 hotkey.py                # tap Ctrl to start recording, tap Ctrl again to finish
 ```
 
-## Why one daemon
-
-It used to be two (`tts_daemon.py` on :8740, `stt_server.py` on :8741) holding
-two copies of the world, and `dictate.py` loaded its own model on every single
-invocation. Now there is one process, one model cache, one port. Transcription
-does not queue â€” overlapping transcription is fine and stays parallel â€” only
-speech queues, because two sessions talking over each other is genuinely bad.
-
 ## Backends
 
 Chosen at startup from what's installed. Nothing is imported until needed, so a
@@ -64,15 +56,14 @@ platform needs a different mechanism:
 | Linux (Wayland) | `wl-copy`/`wl-paste` | `ydotool` / `wtype` | `ydotool` / `wtype` |
 | Windows | `ctypes` (CF_UNICODETEXT), `clip.exe` fallback | `SendInput` Ctrl-V | `SendInput` Unicode scancodes |
 
-Windows needs **no external tools** â€” `SendInput` and the clipboard come from
+Windows needs **no external tools** as `SendInput` and the clipboard come from
 `user32` via `ctypes`, which ships with Python. Typing uses
 `KEYEVENTF_UNICODE` scancodes rather than virtual keys, so text is not
 affected by the active keyboard layout and any character the target can
 display can be sent.
 
 One asymmetry worth knowing: on X11 `insert()` can detect that no window has
-focus and refuse, because `getactivewindow` returns empty. Windows has no such
-signal â€” there is always *a* foreground window â€” so `have_delivery()` reports
+focus and refuse, because `getactivewindow` returns empty. Windows doesnt have this issue...there is always *a* foreground window â€” so `have_delivery()` reports
 the foreground window's title instead, and it is worth checking that the app
 you expect is actually in front. `SetForegroundWindow` is refused unless the
 calling process already owns the foreground, so a script cannot reliably
@@ -81,11 +72,11 @@ bring a window forward before dictating.
 ## Debian / Ubuntu setup
 
 ```sh
-# STT â€” the one thing you actually need
+# STT the one thing you actually need
 sudo apt install python3-pip ffmpeg
 pip install faster-whisper "av<19" sounddevice soundfile numpy
 #   IMPORTANT: the "av<19" pin is not optional. faster-whisper 1.2.1 calls
-#   av.open(metadata_errors=...), which av 19.x removed â€” without the pin
+#   av.open(metadata_errors=...), which av 19.x removed without the pin
 #   every transcription dies with "TypeError: open() got an unexpected
 #   keyword argument 'metadata_errors'". Verified on Debian 13 (trixie).
 #   first run downloads the model; VOICE_WHISPER_SIZE=base.en is the default
@@ -134,7 +125,7 @@ daemon   : up â€” tts=system (espeak-ng) stt=faster-whisper
 
 `stt` may report `cuda` if a GPU is visible. If the CUDA libraries aren't
 actually installed, the first transcription logs a fallback and switches to
-CPU automatically rather than crashing â€” WSL triggers this, since it exposes
+CPU automatically rather than crashing WSL triggers this, since it exposes
 the GPU without shipping the CUDA runtime.
 
 ## Running it as a service
@@ -171,8 +162,7 @@ GET  /status      queue depth, now playing, backends, counters
 GET  /health      {"ok": true, ...}
 ```
 
-Loopback only, no auth â€” it's a local speech device, not a service. Anything
-that can already run code as you can also just play audio.
+Loopback only, no auth because it's a local speech device, not a service.
 
 ## Platform notes
 
@@ -196,24 +186,23 @@ Hold-to-talk with a real hotkey is what `finger_mouse_stt_app/` is for.
 
 - `hotkey.py` (tap Ctrl) has been used on Windows 11 only. The macOS path
   (needs Input Monitoring permission) and Linux X11 path are untested, and it
-  cannot see keys under Wayland. PowerToys' Find My Mouse also fires on
-  double-tapping Ctrl, so leave a pause between the start and stop taps.
+  cannot see keys under Wayland. I did have a similar too I built under MacOS, but this does not share any of that code.
 - `--say` playback confirmation is not wired: the old `SUPPRESS_WORDS` /
   `SILENCE_CONFIRMATIONS` constants were dead code and have been removed
   rather than reimplemented.
 - The HID app's `vosk` engine is a stub that returns `None`.
 - **Paste is unverified on Linux.** Typing is verified end-to-end on real
-  Debian (see below), but every paste chord tried â€” Ctrl+V, Ctrl+Shift+V,
-  Shift+Insert, middle-click â€” failed to land in the test target, *including*
+  Debian (see below), but every paste chord tried (Ctrl+V, Ctrl+Shift+V,
+  Shift+Insert, middle-click) failed to land in the test target, *including*
   with the selection owned by a live process for the duration. That is a
   property of the test environment (WSLg's X server plus xterm), not
   necessarily of your desktop. On a normal GNOME/KDE/wlroots session paste is
   expected to work, but it has not been observed working. If paste does not
   land, use `dictate --type`, which is verified.
 
-## What has been verified, and where
+## Windows tested atm only, these tests have passed:
 
-Tested by running, not by reading:
+Tested by running:
 
 | Check | Environment | Result |
 |---|---|---|
