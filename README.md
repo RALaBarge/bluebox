@@ -8,8 +8,10 @@ Local speech tools for macOS (Apple silicon), Debian-family Linux, and Windows 1
 
 The blue box was a tone generator: it played precise frequencies into a
 handset and made the network do things it wasn't designed to do. This is the
-same trick pointed at your own machine â€” it generates speech and injects it
+same trick pointed at your own machine, it generates speech and injects it
 into the input path, and it listens on the way back in.
+
+-=-~~~ Gr33ts to Captn'Crunch, Kevin Mitnick, and EFNet! ~~~-=-
 
 | Piece | What it does |
 |---|---|
