@@ -9,7 +9,7 @@ Windows 11, and — wired up but untested — the BSDs.
 
 The blue box was a tone generator: it played precise frequencies into a
 handset and made the network do things it wasn't designed to do. This is the
-same trick pointed at your own machine — it generates speech and injects it
+same trick pointed at your own machine -- it generates speech and injects it
 into the input path, and it listens on the way back in.
 
 -=-~~~ Gr33ts to Captn'Crunch, Kevin Mitnick, and EFNet! ~~~-=-
@@ -36,7 +36,7 @@ python3 hotkey.py                # tap Ctrl to start recording, tap Ctrl again t
 ## Platforms
 
 The same Python runs everywhere; nothing is compiled, and every backend is
-probed at startup, so a box that only has half the story still starts.
+probed at startup.
 
 | Platform | Speech out | Speech in | Text delivery | Status |
 |---|---|---|---|---|
@@ -66,14 +66,6 @@ python3 -m app.main            # GUI, from the repo root
 `pynput` on macOS and Windows, **X11 only on Linux** — Wayland gives an app no
 global key access at all, so there you bind `dictate --auto` in your desktop
 settings instead.
-
-## Why one daemon
-
-It used to be two (`tts_daemon.py` on :8740, `stt_server.py` on :8741) holding
-two copies of the world, and `dictate.py` loaded its own model on every single
-invocation. Now there is one process, one model cache, one port. Transcription
-does not queue — overlapping transcription is fine and stays parallel — only
-speech queues, because two sessions talking over each other is genuinely bad.
 
 ## Backends
 
@@ -289,9 +281,9 @@ and window switching.
   expected to work, but it has not been observed working. If paste does not
   land, use `dictate --type`, which is verified.
 
-## What has been verified, and where
+## What has been verified
 
-Tested by running, not by reading:
+Tested by running:
 
 | Check | Environment | Result |
 |---|---|---|
