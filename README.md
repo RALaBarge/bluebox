@@ -16,6 +16,7 @@ into the input path, and it listens on the way back in.
 | `voice_daemon.py` | The warm daemon on `127.0.0.1:8740`. Both directions: `/say` queues text to be spoken, `/transcribe` takes audio in. Models load once. |
 | `say.py` | Stdlib-only client for the daemon. Fails soft: if the daemon is down it warns and exits 0, so `./say` never breaks the pipeline that called it. |
 | `dictate.py` | Push-to-talk. Records the mic, transcribes (via the daemon), delivers text to the focused window. |
+| `hotkey.py` | Tap-Ctrl dictation (needs `pynput`; X11 on Linux): tap Ctrl to start recording, tap again to stop, transcribe and type the text into the focused window. `--paste`/`--clipboard` change delivery. |
 | `delivery.py` | The platform layer: clipboard, paste chord, keystroke. macOS, Linux, and Windows. |
 | `platform_speech.py` | Backend selection â€” which TTS and which STT engine this box can actually run. |
 | `finger_mouse_stt_app/` | PyQt6 app mapping HID device buttons to speech-to-text and window actions (evdev on Linux, hidapi on macOS). Its `typer.py` delegates text insertion to `delivery.py` and keeps only window activation. |
@@ -26,6 +27,7 @@ python3 voice_daemon.py &        # one process, both directions
 ./say --status                   # queue depth, backends, uptime
 ./dictate --auto                 # record until you stop talking, paste into the focused window
 ./dictate --check                # what works on this machine
+python3 hotkey.py                # tap Ctrl to start recording, tap Ctrl again to finish
 ```
 
 ## Why one daemon
@@ -187,6 +189,10 @@ Hold-to-talk with a real hotkey is what `finger_mouse_stt_app/` is for.
 
 ## Known gaps
 
+- `hotkey.py` (tap Ctrl) has been used on Windows 11 only. The macOS path
+  (needs Input Monitoring permission) and Linux X11 path are untested, and it
+  cannot see keys under Wayland. PowerToys' Find My Mouse also fires on
+  double-tapping Ctrl, so leave a pause between the start and stop taps.
 - `--say` playback confirmation is not wired: the old `SUPPRESS_WORDS` /
   `SILENCE_CONFIRMATIONS` constants were dead code and have been removed
   rather than reimplemented.
@@ -213,6 +219,7 @@ Tested by running, not by reading:
 | Clipboard write + read round-trip | Debian 13, Windows 11 | **verified** (unicode, newlines, tabs) |
 | Real speech â†’ transcription through the daemon | Debian 13 | **verified** â€” espeak-ng phrase transcribed correctly |
 | CUDA â†’ CPU fallback when CUDA libs are missing | Debian 13 / WSLg | **verified** â€” logs the fallback, then succeeds |
+| Tap-Ctrl start/stop dictation (`hotkey.py`) | Windows 11 | **verified** — real mic, daemon transcription, typed into the focused window |
 | CUDA → CPU fallback when CUDA libs are missing | Windows 11 | **verified** — `cublas64_12.dll` error falls back to CPU; SAPI phrase transcribed correctly through the daemon |
 | HTTP surface and error codes | Debian 13 + Windows | **verified** (200/400/404 as documented) |
 | No-focus detection and honest failure | Debian 13 | **verified** â€” reports failure with a fix suggestion instead of false success |
