@@ -187,8 +187,6 @@ Hold-to-talk with a real hotkey is what `finger_mouse_stt_app/` is for.
 
 ## Known gaps
 
-- Windows is not supported. `delivery.py --check` says so explicitly rather
-  than pretending.
 - `--say` playback confirmation is not wired: the old `SUPPRESS_WORDS` /
   `SILENCE_CONFIRMATIONS` constants were dead code and have been removed
   rather than reimplemented.
@@ -215,6 +213,7 @@ Tested by running, not by reading:
 | Clipboard write + read round-trip | Debian 13, Windows 11 | **verified** (unicode, newlines, tabs) |
 | Real speech â†’ transcription through the daemon | Debian 13 | **verified** â€” espeak-ng phrase transcribed correctly |
 | CUDA â†’ CPU fallback when CUDA libs are missing | Debian 13 / WSLg | **verified** â€” logs the fallback, then succeeds |
+| CUDA → CPU fallback when CUDA libs are missing | Windows 11 | **verified** — `cublas64_12.dll` error falls back to CPU; SAPI phrase transcribed correctly through the daemon |
 | HTTP surface and error codes | Debian 13 + Windows | **verified** (200/400/404 as documented) |
 | No-focus detection and honest failure | Debian 13 | **verified** â€” reports failure with a fix suggestion instead of false success |
 | Paste (`Ctrl+V`) into a focused window | Debian 13 / WSLg | **not working in this environment**; typing works, so the cause is likely WSLg's X server rather than the chord |

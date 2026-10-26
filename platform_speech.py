@@ -385,7 +385,7 @@ class _FasterWhisper:
             # The encoder is where a missing CUDA library actually surfaces,
             # since loading only checks that a device is visible. Retry once
             # on CPU so a half-configured GPU box still transcribes.
-            if self.device == "cpu" or "libcublas" not in str(e).lower():
+            if self.device == "cpu" or "cublas" not in str(e).lower():
                 raise
             log(f"CUDA failed at encode time ({e}); retrying on CPU")
             from faster_whisper import WhisperModel
