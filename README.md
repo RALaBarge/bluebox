@@ -89,6 +89,9 @@ pip install faster-whisper "av<19" sounddevice soundfile numpy
 #   first run downloads the model; VOICE_WHISPER_SIZE=base.en is the default
 #   set VOICE_WHISPER_SIZE=small.en for better accuracy
 
+# Tap-Ctrl hotkey (optional, hotkey.py)
+pip install pynput
+
 # TTS â€” pick one
 pip install kokoro-onnx          # closest to the macOS Kokoro voices
 # or: sudo apt install espeak-ng  # no model download, robotic but instant
