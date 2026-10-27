@@ -1,8 +1,9 @@
 #!/usr/bin/env python3.12
 """Push-to-talk dictation -> types into whatever window has focus.
 
-Records the mic, transcribes locally, delivers the text. Works on macOS and
-Debian-family Linux; the platform differences live in platform.py.
+Records the mic, transcribes locally, delivers the text. Works on macOS,
+Linux, Windows and the BSDs; the platform differences live in
+platform_speech.py (engines) and delivery.py (getting text into a window).
 
     ./dictate                 # record, Enter to stop, paste into focused window
     ./dictate --auto          # stop after ~1.2s of silence
@@ -39,24 +40,79 @@ import urllib.request
 
 DAEMON = "http://127.0.0.1:8740"
 SAMPLE_RATE = 16_000
-SILENCE_RMS = 0.012   # tune if --auto cuts off too early/late
-SILENCE_SECS = 1.2
-MIN_RECORD_SECS = 0.8
+SILENCE_SECS = 1.2        # --auto stops after this much quiet following speech
+NO_SPEECH_SECS = 8.0      # ...or gives up if nothing is said for this long
+CALIBRATE_SECS = 0.4      # noise floor is measured over the first stretch
+MIN_SPEECH_RMS = 0.004    # speech threshold never goes below this
+MAX_SPEECH_RMS = 0.02     # ...or above this, so early speech can't raise it
 
 
 # --------------------------------------------------------------------------
 # record
 # --------------------------------------------------------------------------
 
+class EndpointDetector:
+    """Decides when the speaker has finished, from per-chunk RMS levels.
+
+    Microphone levels differ a lot (a VM's emulated mic peaked near 0.05), so
+    the speech threshold comes from the noise floor measured at the start
+    rather than a fixed number. Silence only counts once speech has been
+    heard, so waiting a few seconds before talking does not end the recording.
+    """
+
+    def __init__(self, silence_secs: float = SILENCE_SECS,
+                 no_speech_secs: float = NO_SPEECH_SECS,
+                 calibrate_secs: float = CALIBRATE_SECS) -> None:
+        self.silence_secs = silence_secs
+        self.no_speech_secs = no_speech_secs
+        self.calibrate_secs = calibrate_secs
+        self.threshold: float | None = None
+        self.heard = False
+        self._start: float | None = None
+        self._floor: list[float] = []
+        self._quiet_since: float | None = None
+
+    def feed(self, now: float, rms: float) -> bool:
+        """Report one chunk's level at time `now`; True means stop recording."""
+        if self._start is None:
+            self._start = now
+        elapsed = now - self._start
+        if elapsed < self.calibrate_secs:
+            self._floor.append(rms)
+            return False
+        if self.threshold is None:
+            floor = sorted(self._floor)[len(self._floor) // 2] if self._floor else 0.0
+            self.threshold = min(MAX_SPEECH_RMS, max(MIN_SPEECH_RMS, floor * 3))
+        if rms >= self.threshold:
+            self.heard = True
+            self._quiet_since = None
+            return False
+        if not self.heard:
+            return elapsed >= self.no_speech_secs
+        if self._quiet_since is None:
+            self._quiet_since = now
+        return now - self._quiet_since >= self.silence_secs
+
+
 def record(auto: bool, seconds: float | None) -> "object":
     import numpy as np
     import sounddevice as sd
 
+    # Nobody can press Enter when stdin is a pipe or a file (it would read
+    # EOF at once and stop the recording), so stop on silence instead.
+    if not auto and seconds is None and not sys.stdin.isatty():
+        auto = True
+
     chunks: list = []
     stop = threading.Event()
+    detector = EndpointDetector() if auto else None
 
     def cb(indata, frames, t, status):
         chunks.append(indata.copy())
+        if detector is not None:
+            rms = float(np.sqrt((indata ** 2).mean()))
+            if detector.feed(time.monotonic(), rms):
+                stop.set()
 
     if not auto and seconds is None:
         threading.Thread(
@@ -66,22 +122,13 @@ def record(auto: bool, seconds: float | None) -> "object":
     else:
         print("recording...", file=sys.stderr)
 
-    silent_for = 0.0
     started = time.time()
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1,
                         dtype="float32", callback=cb):
         while not stop.is_set():
             time.sleep(0.05)
-            elapsed = time.time() - started
-            if seconds is not None and elapsed >= seconds:
+            if seconds is not None and time.time() - started >= seconds:
                 break
-            if auto and elapsed > MIN_RECORD_SECS and chunks:
-                chunk = chunks[-1]
-                rms = float(np.sqrt((chunk ** 2).mean()))
-                dur = len(chunk) / SAMPLE_RATE
-                silent_for = silent_for + dur if rms < SILENCE_RMS else 0.0
-                if silent_for >= SILENCE_SECS:
-                    break
 
     if not chunks:
         return np.zeros(0, dtype=np.float32)
@@ -101,17 +148,30 @@ def to_wav_bytes(audio) -> bytes:
 # --------------------------------------------------------------------------
 
 def transcribe_via_daemon(wav: bytes) -> str | None:
-    """POST to the warm daemon. Returns None if it isn't there."""
+    """POST to the warm daemon. Returns None only if it isn't there.
+
+    A daemon that answers with an error, or does not answer in time, raises
+    instead: loading a second copy of the model in this process would fail the
+    same way, only slower.
+    """
     req = urllib.request.Request(
         DAEMON + "/transcribe", data=wav,
         headers={"Content-Type": "audio/wav"}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read()).get("text", "").strip()
-    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+    except urllib.error.HTTPError as e:   # a URLError subclass: catch it first
+        try:
+            detail = json.loads(e.read()).get("error")
+        except (ValueError, AttributeError, OSError):
+            detail = None
+        raise RuntimeError(f"daemon error {e.code}: {detail or e.reason}") from None
+    except TimeoutError:
+        raise RuntimeError("daemon did not answer within 120s") from None
+    except (urllib.error.URLError, ConnectionError, OSError):
         return None
     except json.JSONDecodeError:
-        return None
+        raise RuntimeError("daemon sent a reply that is not JSON") from None
 
 
 def transcribe_in_process(wav: bytes) -> str:
@@ -213,7 +273,11 @@ def main() -> None:
         print("no audio captured", file=sys.stderr)
         sys.exit(1)
 
-    text = transcribe(to_wav_bytes(audio))
+    try:
+        text = transcribe(to_wav_bytes(audio))
+    except RuntimeError as e:
+        print(f"transcription failed: {e}", file=sys.stderr)
+        sys.exit(1)
     if not text:
         print("(empty transcript)", file=sys.stderr)
         sys.exit(1)

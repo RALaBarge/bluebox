@@ -1,9 +1,8 @@
+import io
 import json
 import os
 import subprocess
 import tempfile
-import threading
-import time
 import urllib.request
 import urllib.error
 from typing import Optional
@@ -37,18 +36,12 @@ class STTEngine:
         except ImportError:
             return None
         try:
-            temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            buf = io.BytesIO()
             try:
-                sf.write(temp.name, audio_data, sample_rate)
+                sf.write(buf, audio_data, sample_rate, format="WAV")
             except Exception:
-                temp.close()
-                os.unlink(temp.name)
                 return None
-            temp.close()
-
-            with open(temp.name, "rb") as f:
-                audio_bytes = f.read()
-            os.unlink(temp.name)
+            audio_bytes = buf.getvalue()
 
             req = urllib.request.Request(
                 self.server_url.rstrip("/") + "/transcribe",
@@ -72,29 +65,32 @@ class STTEngine:
             print("[stt] local whisper needs soundfile")
             return None
 
-        temp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-        sf.write(temp.name, audio_data, sample_rate)
-        temp.close()
-
-        try:
-            result = subprocess.run(
-                ["whisper", temp.name, "--model", "base", "--output_format", "json"],
-                capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                text = data.get("text", "").strip()
-                return text or None
-            print(f"[stt] whisper failed: {result.stderr.strip()[:200]}")
-            return None
-        except FileNotFoundError:
-            print("[stt] whisper CLI not found — install openai-whisper")
-            return None
-        except subprocess.TimeoutExpired:
-            print("[stt] whisper timed out")
-            return None
-        finally:
-            os.unlink(temp.name)
+        # The whisper CLI writes <name>.json into --output_dir; it prints no JSON.
+        with tempfile.TemporaryDirectory() as d:
+            wav = os.path.join(d, "audio.wav")
+            sf.write(wav, audio_data, sample_rate)
+            try:
+                result = subprocess.run(
+                    ["whisper", wav, "--model", "base",
+                     "--output_format", "json", "--output_dir", d],
+                    capture_output=True, text=True, timeout=120,
+                )
+            except FileNotFoundError:
+                print("[stt] whisper CLI not found — install openai-whisper")
+                return None
+            except subprocess.TimeoutExpired:
+                print("[stt] whisper timed out")
+                return None
+            if result.returncode != 0:
+                print(f"[stt] whisper failed: {result.stderr.strip()[:200]}")
+                return None
+            try:
+                with open(os.path.join(d, "audio.json")) as f:
+                    text = json.load(f).get("text", "").strip()
+            except (OSError, ValueError):
+                print("[stt] whisper wrote no readable result")
+                return None
+            return text or None
 
     def _transcribe_vosk(self, audio_data: bytes, sample_rate: int) -> Optional[str]:
         print("[stt] vosk engine not implemented")
@@ -110,12 +106,3 @@ class STTEngine:
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return False
         return False
-
-
-def _fallback_text(audio_data):
-    """Deprecated: previously returned a fake transcript placeholder.
-
-    No longer used — a failed transcription returns None so callers can skip
-    delivery instead of typing a placeholder into the user's window.
-    """
-    return None

@@ -15,8 +15,9 @@ dictation paid a cold model load on every single invocation.
     GET  /health     {"ok": true, ...}
 
 Speech queues; transcription does not. Overlapping TTS is genuinely bad (two
-sessions talking over each other), but overlapping transcription is fine and
-should stay parallel — so the queue is on /say only.
+sessions talking over each other), so /say is queued. Transcription requests
+are accepted at any time but run one at a time: the MLX and CUDA backends are
+not safe to drive from several threads at once.
 
 Run:    python3.12 voice_daemon.py            (port 8740)
 Client: say.py  /  dictate.py
@@ -53,6 +54,11 @@ DEFAULT_VOICE = "af_heart"
 DEFAULT_SPEED = 1.0          # was 2.0 — Kokoro's usable range is ~0.7–1.3
 MAX_TEXT = 5000              # chars per request; longer gets truncated
 MAX_AUDIO = 32 * 1024 * 1024  # 32 MB per transcription
+# The format becomes a temp-file suffix, so it must not be free text.
+AUDIO_FORMATS = {"wav", "flac", "mp3", "ogg", "m4a", "webm"}
+# Content types a web page can POST cross-origin without a CORS preflight.
+SIMPLE_TYPES = {"text/plain", "application/x-www-form-urlencoded",
+                "multipart/form-data"}
 
 _q: "queue.Queue[dict]" = queue.Queue()
 _state = {
@@ -63,7 +69,8 @@ _state = {
 }
 _skip = threading.Event()
 _tts_lock = threading.Lock()
-_stt_lock = threading.Lock()
+_stt_lock = threading.Lock()       # guards loading the model
+_stt_run_lock = threading.Lock()   # one transcription at a time
 _tts = None   # cached backend object
 _stt = None
 
@@ -150,7 +157,10 @@ def _transcribe(audio: bytes, fmt: str = "wav") -> str:
         f.write(audio)
         path = f.name
     try:
-        return (stt.transcribe(path) or "").strip()
+        with _stt_run_lock:
+            text = (stt.transcribe(path) or "").strip()
+            _state["transcribed"] += 1
+        return text
     finally:
         try:
             os.unlink(path)
@@ -174,6 +184,30 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     # -- helpers ----------------------------------------------------------
+    def _allowed(self) -> bool:
+        """Refuse requests that did not come from a local program.
+
+        The daemon has no auth, so any web page the user visits could otherwise
+        queue speech (a text/plain POST needs no CORS preflight) or read the
+        API through DNS rebinding. Browsers always send Origin on a
+        cross-origin POST and a Host naming the attacker's domain; the local
+        clients (say.py, dictate.py, app/) send neither.
+        """
+        port = self.server.server_address[1]
+        host = (self.headers.get("Host") or "").lower()
+        if host and host not in (f"127.0.0.1:{port}", f"localhost:{port}"):
+            self._json(403, {"ok": False, "error": "bad Host header"})
+            return False
+        if self.headers.get("Origin"):
+            self._json(403, {"ok": False,
+                             "error": "cross-origin requests are refused"})
+            return False
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0]
+        if ctype.strip().lower() in SIMPLE_TYPES:
+            self._json(415, {"ok": False, "error": "unsupported content type"})
+            return False
+        return True
+
     def _read_body(self) -> bytes:
         length = int(self.headers.get("Content-Length", 0) or 0)
         if length <= 0:
@@ -184,6 +218,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- GET --------------------------------------------------------------
     def do_GET(self):  # noqa: N802
+        if not self._allowed():
+            return
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         if path == "/health":
             self._json(200, {
@@ -214,6 +250,8 @@ class Handler(BaseHTTPRequestHandler):
 
     # -- POST -------------------------------------------------------------
     def do_POST(self):  # noqa: N802
+        if not self._allowed():
+            return
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
         try:
             body = self._read_body()
@@ -226,7 +264,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/transcribe":
             self._handle_transcribe(body)
         elif path == "/skip":
+            # The flag stops backends that check it between segments; stopping
+            # playback ends the one that is already in the speakers.
             _skip.set()
+            ps.stop_playback()
             self._json(200, {"ok": True})
         elif path == "/clear":
             dropped = 0
@@ -247,17 +288,30 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError) as e:
             self._json(400, {"ok": False, "error": f"bad json: {e}"})
             return
-        text = (data.get("text") or "").strip()
+        if not isinstance(data, dict):
+            self._json(400, {"ok": False, "error": "body must be a JSON object"})
+            return
+        text = data.get("text")
+        # NUL cannot be passed to a child process and means nothing to a voice.
+        text = text.replace("\x00", "").strip() if isinstance(text, str) else ""
         if not text:
             self._json(400, {"ok": False, "error": "empty text"})
             return
+        speed = data.get("speed")
+        if speed is not None:
+            try:
+                speed = float(speed)
+            except (TypeError, ValueError):
+                self._json(400, {"ok": False, "error": "speed must be a number"})
+                return
         if len(text) > MAX_TEXT:
             text = text[:MAX_TEXT] + " ... truncated."
+        voice = data.get("voice")
         _q.put({
             "text": text,
-            "voice": data.get("voice"),
-            "speed": data.get("speed"),
-            "source": data.get("source", "unknown"),
+            "voice": voice if isinstance(voice, str) else None,
+            "speed": speed,
+            "source": str(data.get("source", "unknown"))[:64],
             "ts": time.time(),
         })
         self._json(200, {"ok": True, "queued": _q.qsize()})
@@ -279,6 +333,10 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, json.JSONDecodeError) as e:
                 self._json(400, {"ok": False, "error": f"bad json: {e}"})
                 return
+            if not isinstance(data, dict):
+                self._json(400, {"ok": False,
+                                 "error": "body must be a JSON object"})
+                return
             b64 = data.get("audio_b64")
             if not b64:
                 self._json(400, {"ok": False, "error": "no audio_b64"})
@@ -294,14 +352,18 @@ class Handler(BaseHTTPRequestHandler):
             if not audio:
                 self._json(400, {"ok": False, "error": "decoded audio is empty"})
                 return
-            fmt = (data.get("format") or "wav").lstrip(".")
+            fmt = str(data.get("format") or "wav").lstrip(".").lower()
+            if fmt not in AUDIO_FORMATS:
+                self._json(400, {"ok": False,
+                                 "error": f"format must be one of "
+                                          f"{sorted(AUDIO_FORMATS)}"})
+                return
 
         try:
             text = _transcribe(audio, fmt)
         except Exception as e:  # noqa: BLE001 — never die on bad audio
             self._json(500, {"ok": False, "error": str(e)})
             return
-        _state["transcribed"] += 1
         self._json(200, {"text": text})
 
     def log_message(self, fmt, *args):

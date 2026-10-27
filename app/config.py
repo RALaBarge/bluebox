@@ -1,11 +1,29 @@
 import json
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from typing import Optional
 
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "finger-mouse-stt")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+LOG_DIR = os.path.join(os.path.expanduser("~"), ".cache", "bluebox")
+
+
+def append_log(name: str, line: str) -> None:
+    """Append a line to a per-user log. Never raises.
+
+    The daemons used to log to /tmp, which other users can read, and the logs
+    can name windows and hold dictated text. This directory and file are
+    private to the user.
+    """
+    try:
+        os.makedirs(LOG_DIR, mode=0o700, exist_ok=True)
+        fd = os.open(os.path.join(LOG_DIR, name),
+                     os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 
 @dataclass
@@ -38,8 +56,16 @@ class AppConfig:
         try:
             with open(CONFIG_FILE) as f:
                 data = json.load(f)
-            return cls(**data)
-        except (json.JSONDecodeError, KeyError, TypeError):
+            known = {f.name for f in fields(cls)}
+            return cls(**{k: v for k, v in data.items() if k in known})
+        except OSError:
+            return cls()
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            # Keep the unreadable file: the next save() would overwrite it.
+            try:
+                os.replace(CONFIG_FILE, CONFIG_FILE + ".bak")
+            except OSError:
+                pass
             return cls()
 
     def save(self):

@@ -26,10 +26,11 @@ character-by-character is slow and drops characters under load. The `type`
 path exists only for apps that block paste, same as the macOS original.
 
 Clipboard save/restore is deliberately best-effort: we restore what was there
-before, and we never fail the utterance over it. Note that on Linux the
-clipboard can die with the process that owns it (X11 semantics), which is why
-the paste path re-uses one helper process rather than spawning a helper per
-call.
+before, and we never fail the utterance over it. Only text round-trips, so on
+Windows a clipboard holding an image or files makes paste fall back to typing
+rather than destroy it. On Linux the clipboard dies with the process that owns
+it (X11 semantics); xclip and wl-copy fork a child to keep it alive, which is
+why `_run` must not wait on their output.
 """
 
 from __future__ import annotations
@@ -55,6 +56,9 @@ IS_WINDOWS = platform.system() == "Windows"
 # differs.
 IS_BSD = platform.system() in ("FreeBSD", "OpenBSD", "NetBSD", "DragonFly")
 IS_UNIX_DESKTOP = IS_LINUX or IS_BSD
+
+_win_dlls = None
+_x11_cache: tuple[str, float, bool] | None = None
 
 # How long to wait after placing the clipboard before sending the paste key.
 # Too short and the key arrives before the clipboard is populated, which is the
@@ -153,15 +157,23 @@ def _win_key(vk: int, up: bool = False) -> _INPUT:
                                  time=0, dwExtraInfo=None))
 
 
-def _win_unicode(ch: str, up: bool = False) -> _INPUT:
+def _utf16_units(text: str) -> list[int]:
+    """The text as UTF-16 code units. A character above U+FFFF is two units."""
+    data = text.encode("utf-16-le", errors="surrogatepass")
+    return [int.from_bytes(data[i:i + 2], "little")
+            for i in range(0, len(data), 2)]
+
+
+def _win_unicode(unit: int, up: bool = False) -> _INPUT:
     """A single UTF-16 code unit typed as a Unicode scancode.
 
     Using KEYEVENTF_UNICODE rather than virtual keys means we never touch the
     keyboard layout: any character the target can display can be sent,
-    including ones with no VK code at all.
+    including ones with no VK code at all. wScan is 16 bits, so characters
+    outside the BMP must arrive as their surrogate pair, one unit per event.
     """
     return _INPUT(type=_INPUT_KEYBOARD,
-                  ki=_KEYBDINPUT(wVk=0, wScan=ord(ch),
+                  ki=_KEYBDINPUT(wVk=0, wScan=unit,
                                  dwFlags=_KEYEVENTF_UNICODE |
                                  (_KEYEVENTF_KEYUP if up else 0),
                                  time=0, dwExtraInfo=None))
@@ -172,24 +184,24 @@ def _win_send(inputs: list) -> bool:
         return True
     n = len(inputs)
     arr = (_INPUT * n)(*inputs)
-    sent = ctypes.windll.user32.SendInput(n, arr, ctypes.sizeof(_INPUT))
+    sent = _win_api()[0].SendInput(n, arr, ctypes.sizeof(_INPUT))
     return sent == n
 
 
 def _win_type_text(text: str) -> bool:
     """Type via Unicode scancodes, in batches to bound the call size."""
     batch: list = []
-    for ch in text:
+    for unit in _utf16_units(text):
         # Newline: use VK_RETURN, since a literal \n is not a keystroke.
-        if ch == "\n":
+        if unit == 0x0A:
             batch.append(_win_key(0x0D))
             batch.append(_win_key(0x0D, up=True))
-        elif ch == "\t":
+        elif unit == 0x09:
             batch.append(_win_key(0x09))
             batch.append(_win_key(0x09, up=True))
         else:
-            batch.append(_win_unicode(ch))
-            batch.append(_win_unicode(ch, up=True))
+            batch.append(_win_unicode(unit))
+            batch.append(_win_unicode(unit, up=True))
         if len(batch) >= 128:
             if not _win_send(batch):
                 return False
@@ -215,10 +227,22 @@ def _win_api():
     value, GlobalLock then fails, and the read comes back empty even though
     the write succeeded. Declaring the signatures once here is what makes the
     difference between working and not.
-    """
-    u32 = ctypes.windll.user32
-    k32 = ctypes.windll.kernel32
 
+    These are private WinDLL instances, not ctypes.windll's shared ones, so
+    the signatures set here cannot collide with another library (pynput
+    loads user32 too) that sets its own on the same function objects.
+    """
+    global _win_dlls
+    if _win_dlls is not None:
+        return _win_dlls
+    u32 = ctypes.WinDLL("user32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    u32.GetForegroundWindow.restype = ctypes.c_void_p
+    u32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    u32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p,
+                                   ctypes.c_int]
+    u32.CountClipboardFormats.restype = ctypes.c_int
     u32.OpenClipboard.argtypes = [ctypes.c_void_p]
     u32.OpenClipboard.restype = ctypes.c_bool
     u32.CloseClipboard.restype = ctypes.c_bool
@@ -239,7 +263,24 @@ def _win_api():
     k32.GlobalFree.argtypes = [ctypes.c_void_p]
     k32.GlobalFree.restype = ctypes.c_void_p
 
-    return u32, k32
+    _win_dlls = (u32, k32)
+    return _win_dlls
+
+
+def _win_clipboard_has_non_text() -> bool:
+    """True if the clipboard holds something that is not text (an image, files).
+
+    Only text survives the save/restore around a paste, so anything else would
+    be emptied and lost.
+    """
+    u32, _ = _win_api()
+    if not u32.OpenClipboard(None):
+        return False
+    try:
+        return (u32.CountClipboardFormats() > 0
+                and not u32.IsClipboardFormatAvailable(13))  # CF_UNICODETEXT
+    finally:
+        u32.CloseClipboard()
 
 
 def _win_clipboard_read() -> bytes:
@@ -298,7 +339,7 @@ def _win_clipboard_write(data: bytes) -> bool:
 
 
 def _win_foreground_title() -> str:
-    u32 = ctypes.windll.user32
+    u32 = _win_api()[0]
     hwnd = u32.GetForegroundWindow()
     if not hwnd:
         return ""
@@ -334,8 +375,23 @@ def is_wayland() -> bool:
 
 
 def _x11_usable() -> bool:
-    """True if DISPLAY points at an X server we can actually talk to."""
-    import os
+    """True if DISPLAY points at an X server we can actually talk to.
+
+    One insert() asks this several times, and each probe spawns xdpyinfo, so
+    the answer is kept for a few seconds per DISPLAY.
+    """
+    global _x11_cache
+    display = os.environ.get("DISPLAY", "")
+    now = time.monotonic()
+    if (_x11_cache and _x11_cache[0] == display
+            and now - _x11_cache[1] < 5.0):
+        return _x11_cache[2]
+    ok = _x11_probe()
+    _x11_cache = (display, now, ok)
+    return ok
+
+
+def _x11_probe() -> bool:
     if not os.environ.get("DISPLAY"):
         return False
     # xdpyinfo is the cheap, definitive probe; xset is a common fallback.
@@ -591,11 +647,12 @@ def have_delivery() -> tuple[bool, str]:
 
     if IS_UNIX_DESKTOP:
         os_name = platform.system()
-        found = [t for t in ("ydotool", "wtype", "xdotool") if _which(t)]
-        if not found:
+        if not any(_which(t) for t in ("ydotool", "wtype", "xdotool")):
             return False, (f"{os_name}: no input tool found — install one of "
                            "ydotool (Wayland/X11), wtype (wlroots), "
                            "or xdotool (X11)")
+        found = [t for t in ("ydotool", "wtype", "xdotool", "xclip", "wl-copy")
+                 if _which(t)]
         note = f"{os_name} via " + ", ".join(found)
         if _x11_usable() and _no_focus_expected():
             # A target may still exist: insert() can reactivate the last
@@ -772,6 +829,10 @@ def insert(text: str, mode: str = "paste") -> tuple[bool, str]:
             return False, (f"no focused window, and the last target ({wid}) "
                            "would not take focus — click a window")
         time.sleep(_PASTE_SETTLE)
+
+    if mode == "paste" and IS_WINDOWS and _win_clipboard_has_non_text():
+        # Pasting would empty a clipboard we cannot put back; typing leaves it be.
+        mode = "type"
 
     if mode == "type":
         ok = _type_text(text)

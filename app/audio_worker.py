@@ -14,7 +14,9 @@ class AudioRecorder(threading.Thread):
         self.device = device
         self.on_audio = on_audio
         self._recording = threading.Event()
-        self._stop = threading.Event()
+        # Not `_stop`: Thread has a method of that name, and shadowing it
+        # makes join() raise TypeError on Python 3.12 and older.
+        self._halt = threading.Event()
         self._audio_queue: queue.Queue = queue.Queue()
 
     def start_recording(self):
@@ -28,7 +30,7 @@ class AudioRecorder(threading.Thread):
 
     def run(self):
         def callback(indata, frames, time_info, status):
-            if self._recording.is_set() and not self._stop.is_set():
+            if self._recording.is_set() and not self._halt.is_set():
                 self._audio_queue.put(indata.copy())
 
         try:
@@ -39,7 +41,7 @@ class AudioRecorder(threading.Thread):
                 dtype="float32",
                 callback=callback,
             ):
-                while not self._stop.is_set():
+                while not self._halt.is_set():
                     time.sleep(0.05)
                     if not self._recording.is_set():
                         while not self._audio_queue.empty():
@@ -59,7 +61,7 @@ class AudioRecorder(threading.Thread):
         return None
 
     def stop(self):
-        self._stop.set()
+        self._halt.set()
 
 
 def default_input_device_index() -> Optional[int]:

@@ -41,13 +41,14 @@ try:
 except Exception:  # pragma: no cover
     Quartz = None
 
+from .config import append_log
 from .stt import STTEngine
+from .typer import deliver_text
 
 R1_VID = 0x004C
 R1_PID = 0x014C
 PTT_DEFAULT = 0x20   # central analogue / talk button (momentary)
-STT_URL = "http://127.0.0.1:8740"   # unified daemon: /transcribe and /say
-TTS_URL = "http://127.0.0.1:8740"
+STT_URL = "http://127.0.0.1:8740"   # unified daemon: /transcribe
 SAMPLE_RATE = 16000
 SILENCE_RMS = 0.012
 SILENCE_SECS = 1.2
@@ -57,69 +58,56 @@ MAX_RECORD_SECS = 45    # never record forever if nothing is said
 
 CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "finger-mouse-stt")
 BIND_FILE = os.path.join(CONFIG_DIR, "r1_bindings.json")
-LOG_FILE = os.path.join("/tmp", "r1_daemon.log")
+
+# name -> [(frequency Hz, seconds), ...]. Anything not listed is silent.
+_CUES = {
+    "start": [(880, 0.12)],
+    "bound": [(660, 0.08)],
+    "error": [(220, 0.15), (220, 0.15)],
+}
 
 
 # --------------------------------------------------------------------------- #
 # Fire-and-forget helpers (never block the HID loop).                        #
 # --------------------------------------------------------------------------- #
-def _say(text: str):
-    """TTS feedback via the 8740 daemon (non-blocking)."""
-    import urllib.request
+def _cue(kind: str):
+    """Non-speech audio feedback (non-blocking).
+
+    Spoken cues were retired: the mic picked "recording" up and it was
+    transcribed into the user's window. A tone is not a word.
+    """
+    tones = _CUES.get(kind)
+    if not tones:
+        return
 
     def go():
         try:
-            req = urllib.request.Request(
-                TTS_URL + "/say",
-                data=json.dumps({"text": text, "voice": "af_heart"}).encode(),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            urllib.request.urlopen(req, timeout=5)
+            import numpy as np
+            import sounddevice as sd
+            sr = 20000
+            for freq, dur in tones:
+                t = np.linspace(0, dur, int(sr * dur), endpoint=False)
+                sd.play((np.sin(2 * np.pi * freq * t) * 0.4).astype(np.float32), sr)
+                sd.wait()
+                time.sleep(0.03)
         except Exception:
             pass
     threading.Thread(target=go, daemon=True).start()
 
 
-def _paste_into_focused(text: str, target: Optional[dict] = None):
-    """Clipboard + Cmd-V into a chosen target window; restore the old clipboard.
-    Mirrors dictate.py's proven timed paste (sleeps before/after so the paste
-    actually lands before the clipboard is restored / the Cmd-V fires).
+def _paste_into_focused(text: str, target: Optional[dict] = None) -> bool:
+    """Bring the target window forward, then paste through delivery.py.
 
     target: dict {pid, name} to activate first; if None, pastes into whatever
-    is frontmost.
+    is frontmost. Returns False if the text could not be delivered.
     """
-    import subprocess
-    import time
-
     if target and target.get("pid"):
         _activate_by_pid(target["pid"])
     elif target and target.get("name"):
         _activate_by_name(target["name"])
     if target:
         time.sleep(0.25)  # let activation settle before pasting
-
-    def old_clip():
-        try:
-            return subprocess.run(["pbpaste"], capture_output=True).stdout
-        except Exception:
-            return b""
-
-    old = old_clip()
-    try:
-        subprocess.run(["pbcopy"], input=text.encode(), check=True)
-        time.sleep(0.15)  # clipboard must be readable before Cmd-V
-        subprocess.run([
-            "osascript", "-e",
-            'tell application "System Events" to keystroke "v" using command down',
-        ], check=True)
-        time.sleep(0.4)   # let the paste land before restoring the clipboard
-    except Exception:
-        pass
-    try:
-        subprocess.run(["pbcopy"], input=old)
-    except Exception:
-        pass
+    return deliver_text(text)
 
 
 def _frontmost_app_info():
@@ -234,7 +222,8 @@ class R1Daemon:
         self._rec = None  # TalkRecorder (created on first talk)
         self._recording = False
         self._rec_since = 0.0
-        self._silent_for = 0.0
+        self._quiet_since = None   # when the current stretch of quiet began
+        self._last_level = 0.0     # when the input level was last measured
 
     # persistence ------------------------------------------------------------ #
     def _load_bindings(self) -> dict:
@@ -280,23 +269,24 @@ class R1Daemon:
     def _bind_current(self, code: int):
         info = _frontmost_app_info()
         if not info:
-            _say("no window")
+            _cue("error")
             return
         self._bindings[code] = info
         self._save_bindings()
-        _say(f"bound {info['name']}")
+        _cue("bound")
 
     def _focus_bound(self, code: int):
         b = self._bindings.get(code)
         if not b:
-            _say("not bound")
+            _cue("error")
             return
         ok = False
         if b.get("pid"):
             ok = _activate_by_pid(b["pid"])
         if not ok and b.get("name"):
             ok = _activate_by_name(b["name"])
-        _say("focus" if ok else "no window")
+        if not ok:
+            _cue("error")
 
     # talk -------------------------------------------------------------------- #
     def _start_talk(self):
@@ -307,24 +297,51 @@ class R1Daemon:
         self._rec.arm()
         self._recording = True
         self._rec_since = time.time()
+        self._quiet_since = None
+        self._last_level = 0.0
         self._log(f"talk start target={self._talk_target}")
-        _say("recording")
+        _cue("start")
+
+    def _check_auto_stop(self, now: float):
+        """End the recording on the time cap, or on quiet after real speech.
+
+        recent_rms() is what notices speech (it sets saw_speech), so it has to
+        run on every check; gating it behind saw_speech meant speech was never
+        noticed and a silence stop never fired. It concatenates recent audio,
+        so it is measured every 100 ms rather than on every 15 ms HID poll.
+        """
+        if not self._recording or self._rec is None:
+            return
+        if now - self._rec_since >= MAX_RECORD_SECS:
+            self._log("talk max duration reached")
+            self._stop_talk()
+            return
+        if now - self._last_level < 0.1:
+            return
+        self._last_level = now
+        quiet = self._rec.is_silent()
+        if not self._rec.saw_speech or not quiet:
+            self._quiet_since = None
+        elif self._quiet_since is None:
+            self._quiet_since = now
+        elif now - self._quiet_since >= SILENCE_SECS:
+            self._stop_talk()
 
     def _stop_talk(self):
         if not self._recording:
             return
         self._recording = False
-        self._silent_for = 0.0
+        self._quiet_since = None
         self._rec.disarm()
         audio = self._rec.drain_audio()
         self._log(
             f"talk stop samples={len(self._rec.samples)} "
             f"rms={round(self._rec.max_rms, 4)}, saw_speech={self._rec.saw_speech}")
         if audio is None:
-            _say("no audio")
+            _cue("error")
             return
         if not self._rec.saw_speech and self._rec.max_rms < SPEECH_RMS:
-            _say("no speech")
+            _cue("error")
             return
         target = getattr(self, "_talk_target", None)
         threading.Thread(target=self._transcribe_paste,
@@ -342,15 +359,17 @@ class R1Daemon:
             text = self._stt.transcribe(audio, SAMPLE_RATE) or ""
         except Exception as e:
             self._log(f"transcribe EXC: {e!r}")
-            _say("error")
+            _cue("error")
             return
         cleaned = text.replace("<unk>", "").replace("<|unk|>", "").strip()
-        self._log(f"transcribe -> {text!r} (cleaned {cleaned!r})")
+        self._log(f"transcribe -> {len(cleaned)} chars")
         if not cleaned:
-            _say("no speech")
+            _cue("error")
             return
-        _paste_into_focused(cleaned, target)
-        _say("done")
+        if not _paste_into_focused(cleaned, target):
+            # The only record of what was said; keep it so it is not lost.
+            self._log(f"delivery failed; transcript: {cleaned!r}")
+            _cue("error")
 
     # ---- button edge dispatch ------------------------------------------------ #
     def _on_press(self, code: int):
@@ -375,7 +394,6 @@ class R1Daemon:
     # main --------------------------------------------------------------------- #
     def run(self):
         self._log(f"R1 daemon starting; bindings={len(self._bindings)} ptt=0x{self.ptt_code:02x}")
-        _say("ready")
         last_no_dev = 0.0
         while not self._stop.is_set():
             handles = []
@@ -411,18 +429,7 @@ class R1Daemon:
 
                     # talk auto-stop on silence (only once real speech has been
                     # heard, so a slow start isn't cut off) — plus a hard cap.
-                    if self._recording and self._rec is not None:
-                        elapsed = time.time() - self._rec_since
-                        if elapsed >= MAX_RECORD_SECS:
-                            self._log("talk max duration reached")
-                            self._stop_talk()
-                        elif self._rec.saw_speech:
-                            if self._rec.is_silent():
-                                self._silent_for += 0.015
-                                if self._silent_for >= SILENCE_SECS:
-                                    self._stop_talk()
-                            else:
-                                self._silent_for = 0.0
+                    self._check_auto_stop(time.time())
 
                     if mask == self._prev_buttons:
                         continue
@@ -447,11 +454,7 @@ class R1Daemon:
                     self._stop_talk()
 
     def _log(self, msg):
-        try:
-            with open(LOG_FILE, "a") as f:
-                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
-        except Exception:
-            pass
+        append_log("r1_daemon.log", f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}")
         print(msg, flush=True)
 
 

@@ -28,6 +28,17 @@ def _load_delivery():
               "text will not be delivered")
         return None
 
+def deliver_text(text: str) -> bool:
+    """Paste text into the focused window through the shared delivery module."""
+    delivery = _load_delivery()
+    if delivery is None:
+        return False
+    ok, note = delivery.insert(text, "paste")
+    if not ok:
+        print(f"[typer] delivery failed: {note}")
+    return ok
+
+
 if _IS_MACOS:
     from .typer_macos import (
         insert_text_macos,
@@ -121,10 +132,4 @@ else:
         Window activation stays here — delivery.py deliberately doesn't know
         about windows.
         """
-        delivery = _load_delivery()
-        if delivery is None:
-            return False
-        ok, note = delivery.insert(text, "paste")
-        if not ok:
-            print(f"[typer] delivery failed: {note}")
-        return ok
+        return deliver_text(text)

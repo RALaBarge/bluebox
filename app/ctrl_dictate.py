@@ -25,11 +25,12 @@ from CoreFoundation import (CFRunLoopGetCurrent, kCFRunLoopDefaultMode,
 import CoreFoundation
 import Quartz
 
+from .config import append_log
 from .stt import STTEngine
+from .typer import deliver_text
 
 STT_URL = "http://127.0.0.1:8740"
 SAMPLE_RATE = 16000
-LOG_FILE = "/tmp/ctrl_dictate.log"
 DOUBLE_TAP_MS = 0.45   # two Control presses this close = a double-tap (toggles)
 
 
@@ -92,26 +93,12 @@ def _activate(pid, name):
     return False
 
 
-def _paste_target(text: str, target):
-    import subprocess
+def _paste_target(text: str, target) -> bool:
+    """Bring the captured window forward and paste via delivery.py."""
     if target:
         _activate(target.get("pid"), target.get("name", ""))
         time.sleep(0.25)
-    old = subprocess.run(["pbpaste"], capture_output=True).stdout
-    try:
-        subprocess.run(["pbcopy"], input=text.encode(), check=True)
-        time.sleep(0.15)
-        subprocess.run([
-            "osascript", "-e",
-            'tell application "System Events" to keystroke "v" using command down',
-        ], check=True)
-        time.sleep(0.4)
-    except Exception:
-        pass
-    try:
-        subprocess.run(["pbcopy"], input=old)
-    except Exception:
-        pass
+    return deliver_text(text)
 
 
 class _Recorder:
@@ -149,11 +136,7 @@ class _Recorder:
 def log(msg):
     line = f"{time.strftime('%H:%M:%S')} {msg}"
     print(line, flush=True)
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
+    append_log("ctrl_dictate.log", line)
 
 
 def main():
@@ -183,12 +166,15 @@ def main():
                 _error_beep()
                 return
             cleaned = text.replace("<unk>", "").replace("<|unk|>", "").strip()
-            log(f"transcribe -> {text!r}")
+            log(f"transcribe -> {len(cleaned)} chars")
             if not cleaned:
                 _error_beep()
                 return
-            _paste_target(cleaned, target)
             # no spoken "done" — silence on success (Ryan 2026-09-14);
+            if not _paste_target(cleaned, target):
+                # The only record of what was said; keep it so it is not lost.
+                log(f"delivery failed; transcript: {cleaned!r}")
+                _error_beep()
         threading.Thread(target=go, daemon=True).start()
 
     def on_flags(proxy, etype, event, userinfo):

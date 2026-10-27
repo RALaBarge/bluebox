@@ -119,8 +119,10 @@ def main() -> None:
 
     try:
         from pynput import keyboard
-    except ImportError:
-        sys.exit("hotkey.py needs pynput: pip install pynput")
+    except ImportError as e:
+        # pynput's own message names the real cause, e.g. a missing Xlib.
+        sys.exit(f"hotkey.py needs pynput (pip install pynput; on the BSDs "
+                 f"also python-xlib): {e}")
 
     ctrl_keys = {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
     rec = Recorder()

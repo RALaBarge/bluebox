@@ -86,7 +86,13 @@ def _play_array(audio, rate: int) -> None:
         w.setframerate(rate)
         w.writeframes(pcm.tobytes())
 
-    _play_wav_blocking(path)
+    try:
+        _play_wav_blocking(path)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _play_wav_blocking(path: str) -> None:
@@ -124,6 +130,45 @@ def _play_wav_blocking(path: str) -> None:
                     _player = None
         return
     log(f"no audio player found; wrote {path}")
+
+
+def _run_tracked(cmd: list[str], env: dict | None = None,
+                 timeout: float = 300) -> int:
+    """Run a speech child that stop_playback() can terminate; return its code."""
+    global _player
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, env=env)
+    with _player_lock:
+        _player = proc
+    try:
+        return proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise
+    finally:
+        with _player_lock:
+            if _player is proc:
+                _player = None
+
+
+def _powershell_speak_cmd(exe: str, text: str, speed) -> tuple[list[str], dict]:
+    """Build the SAPI command line. The text travels in the environment.
+
+    It used to be spliced into the script inside single quotes with only `'`
+    doubled. PowerShell also treats the curly quotes U+2018/2019/201A/201B as
+    single quotes, so an ordinary apostrophe in pasted prose ended the string
+    and anything after it ran as a command. An environment variable is data
+    to PowerShell however it is spelled, so nothing needs escaping.
+    """
+    rate = 0
+    if speed:
+        # SAPI rate is -10..10, roughly 1.0 == 0.
+        rate = max(-10, min(10, int((float(speed) - 1.0) * 10)))
+    script = ("Add-Type -AssemblyName System.Speech; "
+              "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+              f"$s.Rate = {rate}; $s.Speak($env:BLUEBOX_TEXT)")
+    return ([exe, "-NoProfile", "-Command", script],
+            {**os.environ, "BLUEBOX_TEXT": text})
 
 
 def stop_playback() -> None:
@@ -251,30 +296,21 @@ class _SayTTS:
 
     def speak(self, text, voice, speed, should_stop):
         if IS_WINDOWS:
-            # Escape single quotes for the PowerShell string literal.
-            safe = text.replace("'", "''")
-            rate = 0
-            if speed:
-                # SAPI rate is -10..10, roughly 1.0 == 0.
-                rate = max(-10, min(10, int((float(speed) - 1.0) * 10)))
-            ps = ("Add-Type -AssemblyName System.Speech; "
-                  "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
-                  f"$s.Rate = {rate}; "
-                  f"$s.Speak('{safe}')")
-            try:
-                subprocess.run(self.cmd + ["-NoProfile", "-Command", ps],
-                               check=True, timeout=300)
-            except (OSError, subprocess.SubprocessError) as e:
-                log(f"system TTS failed: {e}")
-            return
-
-        cmd = list(self.cmd)
-        if speed and self.cmd[0] == "say":
-            cmd += ["-r", str(int(200 * float(speed)))]
+            cmd, env = _powershell_speak_cmd(self.cmd[0], text, speed)
+        else:
+            cmd, env = list(self.cmd), None
+            if speed and self.cmd[0] == "say":
+                cmd += ["-r", str(int(200 * float(speed)))]
+            # "--" so text that starts with a dash is not read as a flag.
+            cmd += ["--", text]
         try:
-            subprocess.run(cmd + [text], check=True, timeout=300)
+            rc = _run_tracked(cmd, env=env)
         except (OSError, subprocess.SubprocessError) as e:
             log(f"system TTS failed: {e}")
+            return
+        # A skip terminates the child, which is not a failure.
+        if rc != 0 and not should_stop():
+            log(f"system TTS exited with status {rc}")
 
 
 def load_tts():

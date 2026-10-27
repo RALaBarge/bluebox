@@ -22,7 +22,7 @@ into the input path, and it listens on the way back in.
 | `hotkey.py` | Tap-Ctrl dictation (needs `pynput`; X11 only on Linux): tap Ctrl to start recording, tap again to stop, transcribe and type into the focused window. `--paste`/`--clipboard` change delivery. |
 | `delivery.py` | The platform layer: clipboard, paste chord, keystroke. macOS, Linux, Windows, and the BSDs. |
 | `platform_speech.py` | Backend selection — which TTS and which STT engine this box can actually run. |
-| `app/` | **Optional, and nothing at the root imports it.** One flat package (PyQt6; evdev on Linux, hidapi on macOS) mapping HID device buttons to speech-to-text and window actions. It consumes the daemon's `/transcribe` and delegates text insertion to `delivery.py`, keeping only window activation. Entry points: `python3 -m app.main` (GUI), `-m app.ctrl_dictate` (macOS Ctrl-tap), `-m app.r1_daemon` (headless R1 buttons), `-m app.sniff_r1` (HID diagnostics). |
+| `app/` | **Optional, and nothing at the root imports it.** One flat package (PyQt6; evdev on Linux, hidapi on macOS) mapping HID device buttons to speech-to-text and window actions. It consumes the daemon's `/transcribe` and delegates text insertion to `delivery.py`, keeping only window activation. Entry points: `python3 -m app.main` (GUI), `-m app.ctrl_dictate` (macOS Ctrl-tap), `-m app.r1_daemon` (macOS only: headless R1 buttons), `-m app.sniff_r1` (HID diagnostics). |
 
 ```sh
 python3 voice_daemon.py &        # one process, both directions
@@ -44,7 +44,8 @@ probed at startup.
 | Linux (X11) | `kokoro-onnx` / `piper` / `espeak-ng` | faster-whisper / whisper.cpp | `xdotool` / `xclip` | supported, verified |
 | Linux (Wayland) | as X11 | as X11 | `ydotool` / `wtype` / `wl-copy` | supported — typing verified, paste unverified |
 | Windows 11 | SAPI via PowerShell | faster-whisper / whisper.cpp | `SendInput` + Win32 clipboard | supported, verified |
-| FreeBSD / OpenBSD / NetBSD | `espeak-ng` / `piper` | whisper.cpp (faster-whisper if you can get it) | `xdotool` / `xclip` | **wired up, never run on hardware** |
+| FreeBSD (15.1) | `espeak-ng` / `piper` | whisper.cpp | `xdotool` / `xclip` | supported, verified in a VM (type, paste, daemon, hotkey, live mic) |
+| OpenBSD / NetBSD | `espeak-ng` / `piper` | whisper.cpp | `xdotool` / `xclip` | **wired up, never run** |
 
 Windows is the odd one out in a good way: it needs no external tools at all,
 because the clipboard and keystrokes come from `user32` via `ctypes`, which
@@ -172,19 +173,26 @@ the GPU without shipping the CUDA runtime.
 
 ## FreeBSD / OpenBSD / NetBSD setup
 
-**This has not been run on a BSD.** It is here because the code paths line up,
-not because it was observed working. The shape of it:
+**FreeBSD 15.1 was run in a QEMU VM** (results in the table below).
+OpenBSD and NetBSD have never been run; they share the code path, nothing
+more. FreeBSD:
 
 ```sh
-pkg install python311 py311-soundfile espeak-ng xdotool xclip ffmpeg
+pkg install python312 py312-numpy py312-soundfile py312-sounddevice \
+    espeak-ng xdotool xclip whisper.cpp ffmpeg
+pkg install py312-pynput py312-python-xlib     # only for hotkey.py
 ```
+
+`pip install pynput` is not enough on a BSD: pynput's dependency on
+`python-xlib` is marked Linux-only, so pip skips it and `hotkey.py` cannot
+import. Use the packages above.
 
 ```sh
 # STT: whisper.cpp is the reliable path — there is no ctranslate2 wheel for
-# BSD, so faster-whisper usually loses. Build whisper.cpp (or install it from
-# ports if your tree has it), then point the backend at a model:
+# BSD, so faster-whisper usually loses. whisper.cpp is in packages
+# (`whisper-cli`); download a ggml model and point the backend at it:
 export WHISPER_CPP_MODEL=/path/to/ggml-base.en.bin
-python3 dictate.py --check      # expect: delivery : OK — FreeBSD via xdotool
+python3.12 dictate.py --check   # expect: delivery : OK — FreeBSD via xdotool, xclip
 ```
 
 - `delivery.py` treats the BSDs as one family with Linux — same X11 tools, no
@@ -192,9 +200,11 @@ python3 dictate.py --check      # expect: delivery : OK — FreeBSD via xdotool
   `FreeBSD via xdotool, xclip` instead of `unsupported platform`.
 - `platform_speech.py` needed no changes at all: it already falls through to
   `espeak-ng`/`spd-say` for TTS and to whisper.cpp/openai-whisper for STT.
-- The least certain part is **audio capture**. `sounddevice` needs a working
-  backend (`sndio`/`OSS`/`pulse` varies by BSD and by build), so check that
-  before blaming the rest:
+- **Audio capture** works on FreeBSD through OSS (`/dev/dsp`): a live
+  recording through the daemon was transcribed correctly. OpenBSD uses sndio,
+  which has not been tried. `sounddevice` needs a working backend (`sndio`/
+  `OSS`/`pulse` varies by BSD and by build), so check that before blaming the
+  rest:
 
   ```sh
   python3 -c "import sounddevice; print(sounddevice.query_devices())"
@@ -235,7 +245,10 @@ GET  /health      {"ok": true, ...}
 ```
 
 Loopback only, no auth — it's a local speech device, not a service. Anything
-that can already run code as you can also just play audio.
+that can already run code as you can also just play audio. A web page you
+visit cannot: requests carrying an `Origin` header, a `Host` other than
+`127.0.0.1`/`localhost`, or a form/plain-text content type are refused, which
+closes cross-site POSTs and DNS rebinding.
 
 ## Platform notes
 
@@ -251,8 +264,11 @@ Monitoring for the HID app) on first run. On Linux, `ydotool` needs the
 the graphical session they're typing into — from a bare SSH shell they will
 fail, which is expected and not a bug in this repo.
 
-**Recording.** `--auto` stops after ~1.2s of silence (`SILENCE_RMS`,
-`SILENCE_SECS` in `dictate.py` are the knobs). Without it, press Enter to stop.
+**Recording.** `--auto` waits for you to start talking, then stops after ~1.2s
+of quiet (`SILENCE_SECS` in `dictate.py`); it gives up after 8s of nothing. The
+speech threshold follows the microphone's own noise floor, so a quiet mic
+works. Without `--auto`, press Enter to stop; when stdin is not a terminal it
+stops on silence instead.
 For a real hotkey, `hotkey.py` taps Ctrl; `app/` goes further with HID buttons
 and window switching.
 
@@ -262,9 +278,13 @@ and window switching.
   Monitoring) and the Linux X11 path are untested, and it cannot see keys at
   all under Wayland. It is a fresh implementation — no code is shared with the
   earlier macOS HID app.
-- **BSD is untested.** `delivery.py` takes the same X11 path as Linux and
-  `platform_speech.py` needed no changes, but nobody has run this on a BSD —
-  read the platform table as "should work", not "does".
+- **OpenBSD and NetBSD are untested.** FreeBSD was run in a VM; the others
+  share its code path, so read them as "should work", not "does". Real-hardware
+  FreeBSD, a full desktop session, and sndio capture are also untested.
+- **X11 focus-loss detection depends on the window manager.** Openbox keeps its
+  own invisible focus window, so `XGetInputFocus` never reports "nowhere" while
+  it runs and `insert()` can report success with no application focused. A bare
+  X server (no window manager) is detected correctly.
 - **Windows paste is unverified as a whole.** The clipboard and the
   `SendInput` keystroke are each verified independently (see below); the
   two-step paste in one motion was not. `--type` is verified end-to-end.
@@ -272,16 +292,19 @@ and window switching.
   `SILENCE_CONFIRMATIONS` constants were dead code and have been removed
   rather than reimplemented.
 - The HID app's `vosk` engine is a stub that returns `None`.
-- **Paste is unverified on Linux.** Typing is verified end-to-end on real
-  Debian (see below), but every paste chord tried — Ctrl+V, Ctrl+Shift+V,
-  Shift+Insert, middle-click — failed to land in the test target, *including*
-  with the selection owned by a live process for the duration. That is a
-  property of the test environment (WSLg's X server plus xterm), not
-  necessarily of your desktop. On a normal GNOME/KDE/wlroots session paste is
-  expected to work, but it has not been observed working. If paste does not
-  land, use `dictate --type`, which is verified.
+- **Paste is verified on FreeBSD X11 but not on Linux.** Typing is verified
+  end-to-end on real Debian (see below), but every paste chord tried there —
+  Ctrl+V, Ctrl+Shift+V, Shift+Insert, middle-click — failed to land in the
+  test target (WSLg's X server plus xterm). On FreeBSD, Ctrl+V landed in a Tk
+  entry under Xvfb with Openbox and the old clipboard was restored, so the
+  chord and the clipboard handling are sound; xterm simply does not bind
+  Ctrl+V to paste. If paste does not land in your terminal, use
+  `dictate --type`, which is verified.
 
 ## What has been verified
+
+Offline checks live in `tests/`: `python3 -m unittest discover -s tests`
+(numpy is needed for the R1 tests). The table below is what was run by hand.
 
 Tested by running:
 
@@ -303,7 +326,15 @@ Tested by running:
 | Paste (`Ctrl+V`) into a focused window | Windows 11 | **not directly verified**; the clipboard and `SendInput` halves are both verified independently |
 | Live microphone capture | — | **not tested** — WSL exposes no usable input device |
 | macOS paths | — | **not re-tested**; changed only via the shared `_run`/clipboard helpers |
-| BSD delivery branch | simulated `platform.system()` for FreeBSD/OpenBSD/NetBSD | **wiring verified in simulation** — reports `FreeBSD via …` instead of "unsupported platform"; no BSD hardware was involved |
+| `type` injection incl. dash-leading and unicode text | FreeBSD 15.1 VM / Xvfb + Openbox | **verified** into an xterm in raw mode |
+| Paste (`Ctrl+V`) + clipboard restore | FreeBSD 15.1 VM / Xvfb + Openbox | **verified** into a Tk entry; original clipboard restored |
+| No-focus detection and refusal | FreeBSD 15.1 VM / bare Xvfb | **verified** — honest failure; `--clipboard` still works; stale target id refused |
+| Daemon HTTP surface, request guards, `/skip` | FreeBSD 15.1 VM | **verified** — 200/400/403/415 as documented; `/skip` ends the utterance |
+| Real speech → transcription (`whisper.cpp` base.en) | FreeBSD 15.1 VM | **verified** |
+| Live microphone capture over OSS | FreeBSD 15.1 VM, QEMU HD Audio on the host mic (SDL backend) | **verified** — spoken sentences transcribed. The emulated mic delivers ~half real time and is quiet |
+| Tap-Ctrl hotkey (`hotkey.py`) | FreeBSD 15.1 VM / Xvfb | **verified** tap detection with a stand-in recorder; Ctrl+C chord ignored |
+| `--auto` end-of-speech detection | simulated levels (`tests/test_dictate.py`) | **verified in tests**; a live run on the VM was inconclusive |
+| OpenBSD / NetBSD | — | **never run** |
 
 ### Linux gotchas found by testing
 
