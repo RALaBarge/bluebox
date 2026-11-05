@@ -20,6 +20,7 @@ into the input path, and it listens on the way back in.
 | `say.py` | Stdlib-only client for the daemon. Fails soft: if the daemon is down it warns and exits 0, so `./say` never breaks the pipeline that called it. |
 | `dictate.py` | Push-to-talk. Records the mic, transcribes (via the daemon), delivers text to the focused window. |
 | `hotkey.py` | Tap-Ctrl dictation (needs `pynput`; X11 only on Linux): tap Ctrl to start recording, tap again to stop, transcribe and type into the focused window. `--paste`/`--clipboard` change delivery. |
+| `tools/bbtail.s` | **Optional, Linux x86-64 only.** Prints the last transcripts from `~/.bluebox/transcripts.jsonl` (the daemon saves every recording to `~/.bluebox/audio/` and logs each transcript there). Written in assembly with no libc, for fun: `as --64 -o bbtail.o tools/bbtail.s && ld -o bbtail bbtail.o && ./bbtail 10`. |
 | `delivery.py` | The platform layer: clipboard, paste chord, keystroke. macOS, Linux, Windows, and the BSDs. |
 | `platform_speech.py` | Backend selection — which TTS and which STT engine this box can actually run. |
 | `app/` | **Optional, and nothing at the root imports it.** One flat package (PyQt6; evdev on Linux, hidapi on macOS) mapping HID device buttons to speech-to-text and window actions. It consumes the daemon's `/transcribe` and delegates text insertion to `delivery.py`, keeping only window activation. Entry points: `python3 -m app.main` (GUI), `-m app.ctrl_dictate` (macOS Ctrl-tap), `-m app.r1_daemon` (macOS only: headless R1 buttons), `-m app.sniff_r1` (HID diagnostics). |

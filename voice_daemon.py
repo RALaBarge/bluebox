@@ -151,21 +151,68 @@ def _get_stt():
     return _stt
 
 
-def _transcribe(audio: bytes, fmt: str = "wav") -> str:
-    stt = _get_stt()
-    with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as f:
-        f.write(audio)
-        path = f.name
+LOG_DIR = os.path.join(os.path.expanduser("~"), ".bluebox")
+KEEP_AUDIO = 200   # newest recordings kept; older ones are deleted
+
+
+def _keep_audio(audio: bytes, fmt: str) -> str:
+    """Save every recording before transcribing, so a lost or failed
+    transcription can be recovered. Returns the saved path ('' on failure)."""
     try:
-        with _stt_run_lock:
-            text = (stt.transcribe(path) or "").strip()
-            _state["transcribed"] += 1
-        return text
-    finally:
+        d = os.path.join(LOG_DIR, "audio")
+        os.makedirs(d, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(d, f"{stamp}-{int((time.time() % 1) * 1000):03d}.{fmt}")
+        with open(path, "wb") as f:
+            f.write(audio)
+        old = sorted(os.listdir(d))[:-KEEP_AUDIO]
+        for name in old:
+            try:
+                os.unlink(os.path.join(d, name))
+            except OSError:
+                pass
+        return path
+    except OSError as e:
+        log(f"could not save audio: {e}")
+        return ""
+
+
+def _log_transcript(path: str, text: str, error: str = "") -> None:
+    """One JSON line per transcription in ~/.bluebox/transcripts.jsonl."""
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        rec = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "audio": path,
+               "text": text}
+        if error:
+            rec["error"] = error
+        with open(os.path.join(LOG_DIR, "transcripts.jsonl"), "a",
+                  encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except OSError as e:
+        log(f"could not write transcript log: {e}")
+
+
+def _transcribe(audio: bytes, fmt: str = "wav") -> str:
+    kept = _keep_audio(audio, fmt)
+    try:
+        stt = _get_stt()
+        with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as f:
+            f.write(audio)
+            path = f.name
         try:
-            os.unlink(path)
-        except OSError:
-            pass
+            with _stt_run_lock:
+                text = (stt.transcribe(path) or "").strip()
+                _state["transcribed"] += 1
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    except Exception as e:  # noqa: BLE001 — log it, then let the caller report it
+        _log_transcript(kept, "", error=str(e))
+        raise
+    _log_transcript(kept, text)
+    return text
 
 
 # --------------------------------------------------------------------------
