@@ -202,10 +202,11 @@ def _win_type_text(text: str) -> bool:
         else:
             batch.append(_win_unicode(unit))
             batch.append(_win_unicode(unit, up=True))
-        if len(batch) >= 128:
+        if len(batch) >= 16:
             if not _win_send(batch):
                 return False
             batch = []
+            time.sleep(0.01)   # let the target drain its queue; a flood garbles Notepad
     return _win_send(batch)
 
 

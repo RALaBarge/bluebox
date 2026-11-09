@@ -3,7 +3,8 @@
 tap Ctrl again to stop, transcribe, and deliver the text to the focused window.
 
     python hotkey.py                  # tap Ctrl to start, tap Ctrl to finish
-    python hotkey.py --paste          # paste instead of typing
+    python hotkey.py --paste          # paste (the default on Windows)
+    python hotkey.py --type           # keystroke the text (the default elsewhere)
     python hotkey.py --clipboard      # clipboard only
 
 Run it with pythonw.exe on Windows for no console window. Ctrl+C in the
@@ -111,11 +112,17 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="tap-Ctrl dictation")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--paste", action="store_true",
-                      help="paste instead of typing")
+                      help="clipboard + Ctrl-V (the default on Windows)")
+    mode.add_argument("--type", action="store_true",
+                      help="keystroke the text (the default off Windows)")
     mode.add_argument("--clipboard", action="store_true",
                       help="clipboard only, no keystroke")
     args = ap.parse_args()
-    how = "paste" if args.paste else "clipboard" if args.clipboard else "type"
+    # Windows: typing a long transcript as Unicode key events garbled it in Notepad,
+    # while paste lands it exactly, so paste is the default there.
+    default = "paste" if sys.platform == "win32" else "type"
+    how = ("paste" if args.paste else "type" if args.type
+           else "clipboard" if args.clipboard else default)
 
     try:
         from pynput import keyboard
