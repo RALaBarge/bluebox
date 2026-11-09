@@ -13,6 +13,8 @@
 #       from the repo this exe lives in (<repo>\tools\bbtoggle.exe).
 # Off = terminates both. If either dies by itself the dot goes back to gray.
 # Quit also turns bluebox off. One copy at a time. It starts off.
+# Both children live in a kill-on-close Job Object, so they die with this exe even if it is killed
+# from Task Manager (no orphaned daemon or hotkey listener left behind).
 #
 # Needs pythonw on PATH with pynput installed (hotkey.py's requirement).
 #
@@ -74,6 +76,8 @@ hinst:      .skip 8
 hicon_on:   .skip 8
 hicon_off:  .skip 8
 state:      .skip 8
+hjob:       .skip 8
+jbuf:       .skip 144                  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 home:       .skip 264
 dpath:      .skip 300                  # %USERPROFILE%\.bluebox
 tpath:      .skip 320                  # ...\transcripts.jsonl
@@ -246,7 +250,12 @@ spawn:
     mov [rsp+64], rax
     mov [rsp+72], rbx
     call CreateProcessA
-    add rsp, 88
+    test eax, eax
+    jz 1f
+    mov rcx, [rip+hjob]
+    mov rdx, [rbx]                     # PROCESS_INFORMATION.hProcess
+    call AssignProcessToJobObject
+1:  add rsp, 88
     ret
 
 start_all:
@@ -891,6 +900,18 @@ start:
     call GetLastError
     cmp eax, 183                       # ERROR_ALREADY_EXISTS
     je exit
+
+    xor ecx, ecx                       # job object: kill children when this process goes away
+    xor edx, edx
+    call CreateJobObjectA
+    mov [rip+hjob], rax
+    lea rax, [rip+jbuf]
+    mov dword ptr [rax+16], 0x2000     # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    mov rcx, [rip+hjob]
+    mov edx, 9                         # JobObjectExtendedLimitInformation
+    lea r8, [rip+jbuf]
+    mov r9d, 144
+    call SetInformationJobObject
 
     lea rcx, [rip+s_up]                # %USERPROFILE%\.bluebox and its transcripts.jsonl
     lea rdx, [rip+home]
