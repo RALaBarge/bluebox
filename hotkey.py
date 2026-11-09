@@ -25,12 +25,15 @@ Platform notes
   Windows  Works as is.
 
 A short beep marks each state: high = recording started, low = stopped and
-working, double low = nothing to deliver.
+working, double low = nothing to deliver. While recording, the file
+~/.bluebox/recording exists; the Windows tray widget (tools/bbtoggle) blinks red
+for as long as it does.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
@@ -84,6 +87,21 @@ class Recorder:
         return np.concatenate(self._chunks).flatten()
 
 
+REC_FLAG = os.path.join(os.path.expanduser("~"), ".bluebox", "recording")
+
+
+def _flag(on: bool) -> None:
+    """Create or remove the recording flag. Never lets a filesystem hiccup break dictation."""
+    try:
+        if on:
+            os.makedirs(os.path.dirname(REC_FLAG), exist_ok=True)
+            open(REC_FLAG, "w").close()
+        elif os.path.exists(REC_FLAG):
+            os.remove(REC_FLAG)
+    except OSError:
+        pass
+
+
 def deliver(audio, mode: str) -> None:
     if len(audio) < dictate.SAMPLE_RATE * 0.3:
         print("no audio captured", file=sys.stderr)
@@ -124,6 +142,7 @@ def main() -> None:
     how = ("paste" if args.paste else "type" if args.type
            else "clipboard" if args.clipboard else default)
 
+    _flag(False)                 # drop a stale flag left by a crashed run
     try:
         from pynput import keyboard
     except ImportError as e:
@@ -145,10 +164,12 @@ def main() -> None:
                     print(f"cannot open microphone: {e}", file=sys.stderr)
                     beep(300), beep(300)
                     return
+                _flag(True)
                 print("recording...", file=sys.stderr)
                 beep(880)
             else:
                 audio = rec.stop()
+                _flag(False)
                 beep(440)
                 threading.Thread(target=deliver, args=(audio, how),
                                  daemon=True).start()

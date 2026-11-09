@@ -1,6 +1,7 @@
 # bbtoggle: a tray switch that turns bluebox on and off, in x86-64 Windows assembly.
 #
 #   Left-click the tray dot   toggle (gray = off, green = on)
+#   Icon blinks red          while hotkey.py is recording (it creates %USERPROFILE%\.bluebox\recording)
 #   Middle-click              copy the latest transcript to the clipboard
 #   Right-click               menu: last 5 transcripts (click one to copy it), Open transcripts
 #                             folder, Turn on/off, Quit
@@ -54,6 +55,7 @@ s_openf:    .asciz "Open transcripts folder"
 s_open:     .asciz "open"
 s_copied:   .asciz "Copied to clipboard"
 s_bbname:   .asciz "bluebox"
+s_rec:      .asciz "\\recording"
 .align 8
 sinfo:       .long 104                  # STARTUPINFOA.cb
             .fill 100, 1, 0
@@ -77,6 +79,10 @@ hicon_on:   .skip 8
 hicon_off:  .skip 8
 state:      .skip 8
 hjob:       .skip 8
+hicon_red:  .skip 8
+hicon_dim:  .skip 8
+blink:      .skip 8                    # 0 normal icon shown, 1 red, 2 dim red
+rpath:      .skip 320                  # ...\.bluebox\recording
 jbuf:       .skip 144                  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 home:       .skip 264
 dpath:      .skip 300                  # %USERPROFILE%\.bluebox
@@ -633,6 +639,24 @@ build_label:
     pop rbx
     ret
 
+# rax = HICON -> swap the tray icon only (tooltip untouched)
+set_icon:
+    push rdi
+    sub rsp, 32
+    lea rdi, [rip+nid]
+    mov dword ptr [rdi], 528
+    mov rcx, [rip+hwnd]
+    mov [rdi+8], rcx
+    mov dword ptr [rdi+16], 1
+    mov dword ptr [rdi+20], 2          # NIF_ICON
+    mov [rdi+32], rax
+    mov ecx, 1
+    lea rdx, [rip+nid]
+    call Shell_NotifyIconA
+    add rsp, 32
+    pop rdi
+    ret
+
 # Small "Copied to clipboard" balloon on the tray icon.
 balloon:
     push rsi
@@ -851,12 +875,39 @@ w_toggle:
     call toggle
     jmp w_zero
 w_timer:
+    cmp r8d, 2                         # timer 2 = blink tick (400 ms), timer 1 = liveness (2 s)
+    je w_blink
     cmp dword ptr [rip+state], 0
     je w_zero
     call check_alive
 w_zero:
     xor eax, eax
     jmp w_out
+w_blink:
+    cmp dword ptr [rip+state], 0
+    je w_bl_off
+    lea rcx, [rip+rpath]
+    call GetFileAttributesA
+    cmp eax, -1
+    je w_bl_off
+    cmp dword ptr [rip+blink], 1
+    je w_bl_dim
+    mov dword ptr [rip+blink], 1
+    mov rax, [rip+hicon_red]
+    call set_icon
+    jmp w_zero
+w_bl_dim:
+    mov dword ptr [rip+blink], 2
+    mov rax, [rip+hicon_dim]
+    call set_icon
+    jmp w_zero
+w_bl_off:
+    cmp dword ptr [rip+blink], 0
+    je w_zero
+    mov dword ptr [rip+blink], 0
+    mov ecx, 1
+    call update_tray                   # back to the normal on/off icon
+    jmp w_zero
 w_destroy:
     call stop_all
     mov ecx, 2
@@ -927,6 +978,11 @@ start:
     call cpy
     lea rsi, [rip+s_tj]
     call cpy
+    lea rdi, [rip+rpath]
+    lea rsi, [rip+dpath]
+    call cpy
+    lea rsi, [rip+s_rec]
+    call cpy
 
     xor ecx, ecx
     lea rdx, [rip+exepath]
@@ -951,6 +1007,12 @@ start:
     mov ecx, 0xFF2EB82E
     call make_icon
     mov [rip+hicon_on], rax
+    mov ecx, 0xFFE01010
+    call make_icon
+    mov [rip+hicon_red], rax
+    mov ecx, 0xFF601818
+    call make_icon
+    mov [rip+hicon_dim], rax
 
     xor ecx, ecx
     call GetModuleHandleA
@@ -987,6 +1049,11 @@ start:
     mov rcx, [rip+hwnd]
     mov edx, 1
     mov r8d, 2000
+    xor r9d, r9d
+    call SetTimer
+    mov rcx, [rip+hwnd]
+    mov edx, 2
+    mov r8d, 400
     xor r9d, r9d
     call SetTimer
 
