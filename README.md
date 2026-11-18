@@ -1,7 +1,5 @@
 # bluebox
 
-`cereal killer...as in fruit loops?!?`
-
 Local speech tools for macOS (Apple silicon), Debian-family and other Linux,
 Windows 11, and the BSDs.
 
