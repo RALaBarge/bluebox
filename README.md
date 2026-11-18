@@ -11,6 +11,8 @@ into the input path, and it listens on the way back in.
 
 <p align="center"> -=-~~~ Gr33ts to Captn'Crunch, Kevin Mitnick, and EFNet! ~~~-=- </p>
 
+
+
 | Piece | What it does |
 |---|---|
 | `voice_daemon.py` | The warm daemon on `127.0.0.1:8740`. Both directions: `/say` queues text to be spoken, `/transcribe` takes audio in. Models load once. |
