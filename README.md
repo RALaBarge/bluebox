@@ -5,8 +5,6 @@
 Local speech tools for macOS (Apple silicon), Debian-family and other Linux,
 Windows 11, and — wired up but untested — the BSDs.
 
-**Generate the tones. Seize the trunk.**
-
 The blue box was a tone generator: it played precise frequencies into a
 handset and made the network do things it wasn't designed to do. This is the
 same trick pointed at your own machine -- it generates speech and injects it
