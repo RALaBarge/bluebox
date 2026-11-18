@@ -9,7 +9,7 @@ handset and made the network do things it wasn't designed to do like give you fr
 This is /sorta/ the same trick pointed at your own machine. It generates speech and injects it
 into the input path, and it listens on the way back in.
 
--=-~~~ Gr33ts to Captn'Crunch, Kevin Mitnick, and EFNet! ~~~-=-
+<p align="center"> -=-~~~ Gr33ts to Captn'Crunch, Kevin Mitnick, and EFNet! ~~~-=- </p>
 
 | Piece | What it does |
 |---|---|
